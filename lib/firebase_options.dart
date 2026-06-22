@@ -17,14 +17,19 @@ class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
-        throw UnsupportedError(
-          'Run `flutterfire configure` to generate your Firebase configuration. '
-          'See the comment at the top of this file for instructions.',
-        );
+        return android;
       default:
         throw UnsupportedError(
           'DefaultFirebaseOptions are not supported for this platform.',
         );
     }
   }
+
+  static const FirebaseOptions android = FirebaseOptions(
+    apiKey: 'AIzaSyDevPkTXWWsFl8968OVDmX3X9qIO2jIhhI',
+    appId: '1:891334878584:android:c9b3aaf986f85facd2d48d',
+    messagingSenderId: '891334878584',
+    projectId: 'househeroes-69e92',
+    storageBucket: 'househeroes-69e92.firebasestorage.app',
+  );
 }
