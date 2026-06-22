@@ -5,6 +5,7 @@ import '../../../core/utils/week_utils.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../child/providers/child_providers.dart';
 import '../../parent/providers/parent_providers.dart';
+import '../../shared/models/chore.dart';
 import '../../shared/models/chore_instance.dart';
 import '../../shared/widgets/app_loading.dart';
 import '../../shared/widgets/score_chip.dart';
@@ -20,15 +21,27 @@ class _ChildDashboardState extends ConsumerState<ChildDashboard> {
   int _tab = 0;
 
   static const _tabs = [
-    _MyWeekTab(),
-    _AvailableTab(),
+    _HomeTab(),
     _MyChoresTab(),
   ];
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _ensureBalance());
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _initWeek();
+      await _ensureBalance();
+    });
+  }
+
+  Future<void> _initWeek() async {
+    final user = ref.read(currentFamilyUserProvider).valueOrNull;
+    if (user == null) return;
+    final chores =
+        await ref.read(choreRepositoryProvider).getActiveChores(user.familyId);
+    await ref
+        .read(instanceRepositoryProvider)
+        .ensureWeekInitialized(user.familyId, getWeekStart(), chores);
   }
 
   Future<void> _ensureBalance() async {
@@ -61,9 +74,7 @@ class _ChildDashboardState extends ConsumerState<ChildDashboard> {
         onDestinationSelected: (i) => setState(() => _tab = i),
         destinations: const [
           NavigationDestination(
-              icon: Icon(Icons.stars_rounded), label: 'השבוע שלי'),
-          NavigationDestination(
-              icon: Icon(Icons.task_alt_rounded), label: 'זמינות'),
+              icon: Icon(Icons.home_rounded), label: 'הבית'),
           NavigationDestination(
               icon: Icon(Icons.assignment_rounded), label: 'המשימות שלי'),
         ],
@@ -72,14 +83,15 @@ class _ChildDashboardState extends ConsumerState<ChildDashboard> {
   }
 }
 
-// ── Tab 0: My Week ────────────────────────────────────────────────────────────
+// ── Tab 0: Home (goal + today's tasks + available this week) ──────────────────
 
-class _MyWeekTab extends ConsumerWidget {
-  const _MyWeekTab();
+class _HomeTab extends ConsumerWidget {
+  const _HomeTab();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final balanceAsync = ref.watch(myBalanceStreamProvider);
+    final openAsync = ref.watch(openInstancesProvider);
     final user = ref.watch(currentFamilyUserProvider).valueOrNull;
     final weekStart = ref.watch(currentWeekStartProvider);
 
@@ -90,65 +102,78 @@ class _MyWeekTab extends ConsumerWidget {
         final quota = user?.weeklyQuota ?? 0;
         final earned = balance?.earned ?? 0;
         final carryover = balance?.carryover ?? 0;
+        final excess = balance?.availableExcess ?? 0;
         final progress =
             quota > 0 ? (earned / quota).clamp(0.0, 1.0) : 0.0;
         final colorScheme = Theme.of(context).colorScheme;
 
+        final allOpen = openAsync.valueOrNull ?? [];
+        final today = DateTime.now();
+        final todayInstances = allOpen
+            .where((i) =>
+                i.choreType == ChoreType.daily &&
+                i.scheduledDate != null &&
+                i.scheduledDate!.year == today.year &&
+                i.scheduledDate!.month == today.month &&
+                i.scheduledDate!.day == today.day)
+            .toList();
+        final weekInstances = allOpen
+            .where((i) =>
+                i.choreType == ChoreType.weekly ||
+                i.choreType == ChoreType.bonus)
+            .toList();
+
         return SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(20),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // ── Weekly goal card ───────────────────────────────────────────
               Text(weekLabel(weekStart),
+                  textAlign: TextAlign.center,
                   style: TextStyle(
                       fontSize: 15, color: colorScheme.onSurfaceVariant)),
-              const SizedBox(height: 24),
-              // Circular progress
-              SizedBox(
-                width: 200,
-                height: 200,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
+              const SizedBox(height: 16),
+              Center(
+                child: SizedBox(
+                  width: 180,
+                  height: 180,
+                  child: Stack(alignment: Alignment.center, children: [
                     SizedBox.expand(
                       child: CircularProgressIndicator(
                         value: progress,
-                        strokeWidth: 14,
-                        backgroundColor:
-                            colorScheme.surfaceContainerHighest,
+                        strokeWidth: 12,
+                        backgroundColor: colorScheme.surfaceContainerHighest,
                       ),
                     ),
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('$earned',
-                            style: TextStyle(
-                                fontSize: 44,
-                                fontWeight: FontWeight.bold,
-                                color: colorScheme.primary)),
-                        Text('מתוך $quota נק׳',
-                            style: TextStyle(
-                                fontSize: 15,
-                                color: colorScheme.onSurfaceVariant)),
-                      ],
-                    ),
-                  ],
+                    Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text('$earned',
+                          style: TextStyle(
+                              fontSize: 40,
+                              fontWeight: FontWeight.bold,
+                              color: colorScheme.primary)),
+                      Text('מתוך $quota נק׳',
+                          style: TextStyle(
+                              fontSize: 13,
+                              color: colorScheme.onSurfaceVariant)),
+                    ]),
+                  ]),
                 ),
               ),
-              const SizedBox(height: 32),
-              // Stats cards
+              const SizedBox(height: 16),
               _StatRow(
                   label: 'הרוויחת השבוע',
                   value: '$earned נקודות',
                   icon: Icons.star_rounded,
                   color: colorScheme.primary),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
               _StatRow(
                   label: 'נותר להשלמת המכסה',
                   value: '${(quota - earned).clamp(0, quota)} נקודות',
                   icon: Icons.flag_rounded,
                   color: colorScheme.secondary),
               if (carryover != 0) ...[
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
                 _StatRow(
                     label: carryover > 0
                         ? 'עודף משבוע שעבר'
@@ -161,10 +186,18 @@ class _MyWeekTab extends ConsumerWidget {
                         ? Colors.green[700]!
                         : Colors.red[700]!),
               ],
-              const SizedBox(height: 24),
-              if (earned >= quota && quota > 0)
+              if (excess > 0) ...[
+                const SizedBox(height: 8),
+                _StatRow(
+                    label: 'נקודות לפרס',
+                    value: '+$excess נקודות',
+                    icon: Icons.card_giftcard_rounded,
+                    color: Colors.amber[700]!),
+              ],
+              if (earned >= quota && quota > 0) ...[
+                const SizedBox(height: 16),
                 Container(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
                     color: Colors.green[50],
                     borderRadius: BorderRadius.circular(12),
@@ -173,8 +206,7 @@ class _MyWeekTab extends ConsumerWidget {
                   child: const Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.celebration_rounded,
-                          color: Colors.green),
+                      Icon(Icons.celebration_rounded, color: Colors.green),
                       SizedBox(width: 8),
                       Text('כל הכבוד! השלמת את המכסה השבועית! 🎉',
                           style: TextStyle(
@@ -183,11 +215,137 @@ class _MyWeekTab extends ConsumerWidget {
                     ],
                   ),
                 ),
+              ],
+
+              // ── Today's tasks ──────────────────────────────────────────────
+              const SizedBox(height: 28),
+              _SectionHeader(
+                title: 'משימות היום',
+                subtitle:
+                    '${today.day}/${today.month}',
+              ),
+              const SizedBox(height: 8),
+              if (openAsync.isLoading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (todayInstances.isEmpty)
+                _EmptySection(label: 'אין משימות יומיות להיום')
+              else
+                ...todayInstances.map((i) => _TaskCard(instance: i)),
+
+              // ── Available this week ────────────────────────────────────────
+              const SizedBox(height: 24),
+              const _SectionHeader(title: 'זמין השבוע'),
+              const SizedBox(height: 8),
+              if (openAsync.isLoading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (weekInstances.isEmpty)
+                _EmptySection(label: 'אין משימות פתוחות השבוע')
+              else
+                ...weekInstances.map((i) => _TaskCard(instance: i)),
+
+              const SizedBox(height: 16),
             ],
           ),
         );
       },
     );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final String? subtitle;
+  const _SectionHeader({required this.title, this.subtitle});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [
+      Text(title,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+      if (subtitle != null) ...[
+        const SizedBox(width: 8),
+        Text(subtitle!,
+            style: TextStyle(
+                fontSize: 13,
+                color: Theme.of(context).colorScheme.onSurfaceVariant)),
+      ],
+      const Expanded(child: Divider(indent: 12)),
+    ]);
+  }
+}
+
+class _EmptySection extends StatelessWidget {
+  final String label;
+  const _EmptySection({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Text(label,
+          style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.onSurfaceVariant)),
+    );
+  }
+}
+
+class _TaskCard extends ConsumerWidget {
+  final ChoreInstance instance;
+  const _TaskCard({required this.instance});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isBonus = instance.choreType == ChoreType.bonus;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        leading: Icon(
+          isBonus ? Icons.star_rounded : Icons.task_alt_rounded,
+          color: isBonus ? Colors.amber[700] : Colors.green,
+          size: 30,
+        ),
+        title: Text(instance.choreName,
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          ScoreChip(score: instance.choreScore),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: () => _claim(ref, context),
+            style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                minimumSize: const Size(0, 36)),
+            child: const Text('קח'),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _claim(WidgetRef ref, BuildContext context) async {
+    final user = ref.read(currentFamilyUserProvider).valueOrNull;
+    if (user == null) return;
+    try {
+      await ref
+          .read(instanceRepositoryProvider)
+          .claimInstance(user.familyId, instance.id, user.email);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('נרשמת למשימה "${instance.choreName}" ✓')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
   }
 }
 
@@ -214,8 +372,7 @@ class _StatRow extends StatelessWidget {
       child: Row(children: [
         Icon(icon, color: color),
         const SizedBox(width: 12),
-        Expanded(
-            child: Text(label, style: const TextStyle(fontSize: 14))),
+        Expanded(child: Text(label, style: const TextStyle(fontSize: 14))),
         Text(value,
             style: TextStyle(
                 fontSize: 14, fontWeight: FontWeight.bold, color: color)),
@@ -224,76 +381,7 @@ class _StatRow extends StatelessWidget {
   }
 }
 
-// ── Tab 1: Available chores ───────────────────────────────────────────────────
-
-class _AvailableTab extends ConsumerWidget {
-  const _AvailableTab();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final openAsync = ref.watch(openInstancesProvider);
-
-    return openAsync.when(
-      loading: () => const AppLoading(),
-      error: (e, _) => Center(child: Text('שגיאה: $e')),
-      data: (instances) {
-        if (instances.isEmpty) {
-          return const Center(
-            child: Text('אין תורנויות זמינות כרגע.',
-                style: TextStyle(fontSize: 16)),
-          );
-        }
-        return ListView.builder(
-          padding: const EdgeInsets.all(8),
-          itemCount: instances.length,
-          itemBuilder: (_, i) => _AvailableCard(instance: instances[i]),
-        );
-      },
-    );
-  }
-}
-
-class _AvailableCard extends ConsumerWidget {
-  final ChoreInstance instance;
-  const _AvailableCard({required this.instance});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: ListTile(
-        leading:
-            const Icon(Icons.task_alt_rounded, color: Colors.green, size: 32),
-        title: Text(instance.choreName,
-            style: const TextStyle(fontWeight: FontWeight.bold)),
-        trailing: ScoreChip(score: instance.choreScore),
-        onTap: () => _claim(ref, context),
-      ),
-    );
-  }
-
-  Future<void> _claim(WidgetRef ref, BuildContext context) async {
-    final user = ref.read(currentFamilyUserProvider).valueOrNull;
-    if (user == null) return;
-    try {
-      await ref
-          .read(instanceRepositoryProvider)
-          .claimInstance(user.familyId, instance.id, user.email);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('תבעת את "${instance.choreName}" ✓')),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$e')));
-      }
-    }
-  }
-}
-
-// ── Tab 2: My chores ──────────────────────────────────────────────────────────
+// ── Tab 1: My chores ──────────────────────────────────────────────────────────
 
 class _MyChoresTab extends ConsumerWidget {
   const _MyChoresTab();
@@ -308,7 +396,7 @@ class _MyChoresTab extends ConsumerWidget {
       data: (instances) {
         if (instances.isEmpty) {
           return const Center(
-            child: Text('טרם תבעת תורנויות השבוע.\nלחץ על "זמינות" כדי להתחיל.',
+            child: Text('טרם נרשמת למשימות השבוע.\nלחץ על "הבית" כדי להתחיל.',
                 textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
           );
         }

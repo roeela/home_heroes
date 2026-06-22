@@ -104,6 +104,7 @@ class _AddMemberScreenState extends ConsumerState<AddMemberScreen> {
               TextField(
                 controller: _quotaCtrl,
                 keyboardType: TextInputType.number,
+                textDirection: TextDirection.ltr,
                 decoration: const InputDecoration(
                     labelText: 'מכסה שבועית (נקודות)',
                     border: OutlineInputBorder()),

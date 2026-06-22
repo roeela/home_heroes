@@ -30,7 +30,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -39,22 +38,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.emoji_events_rounded,
-                    size: 90, color: theme.colorScheme.primary),
-                const SizedBox(height: 16),
-                Text(
-                  'HomeHeroes',
-                  style: theme.textTheme.displaySmall?.copyWith(
-                    color: theme.colorScheme.primary,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'ניהול תורנויות ביתיות',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+                FractionallySizedBox(
+                  widthFactor: 0.9,
+                  child: Image.asset('assets/logo.png'),
                 ),
                 const SizedBox(height: 56),
                 if (_loading)

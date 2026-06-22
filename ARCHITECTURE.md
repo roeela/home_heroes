@@ -95,13 +95,13 @@ Found?
 ```
 Parent creates chore (type: recurring, frequency: 3)
     ↓
-Parent opens app → ParentDashboard.initState() calls ensureWeekInitialized()
+createRecurringInstancesForWeek() called immediately on save
     ↓
 3 open ChoreInstances created for current week (Monday–Sunday)
     ↓
 Child sees instances in "Available" tab
     ↓
-Child taps "תבע" (Claim) → Firestore transaction:
+Child taps "הירשם" (Register) → Firestore transaction:
   checks status == 'open' → sets status='claimed', claimedBy=email
     ↓
 Child goes to "My Chores" tab → taps "בוצע!" (Done)
@@ -124,8 +124,9 @@ Parent taps "דחה" (Reject):
 
 ### Week boundaries
 - Week starts on **Monday 00:00 local time** (`getWeekStart()` in `week_utils.dart`)
-- `ensureWeekInitialized()` is idempotent — checks if any instance exists for the week before creating
-- Called from `ParentDashboard.initState()` (post-frame) every time a parent opens the app
+- `ensureWeekInitialized()` is idempotent — checks per-chore which instances already exist for the week, and only creates missing ones
+- Called from both `ParentDashboard.initState()` and `ChildDashboard.initState()` on every app open — week initialization is independent of which role opens first
+- New recurring chores also get instances created immediately on save (via `createRecurringInstancesForWeek()`), so children see them without waiting for the next app open
 
 ### Carryover calculation
 When `ensureBalanceDoc()` creates a new week's doc, it reads the previous week's balance:
@@ -192,11 +193,37 @@ No code generation (no `riverpod_annotation` / `build_runner`). All providers ar
 | User doc ID | email address | Enables O(1) lookup on sign-in without knowing familyId first |
 | Multi-family support | No (single family) | Simpler data model; app is private per household |
 | Chore slot model | Open pool (any child can claim) | Encourages competition among siblings |
-| Recurring instance creation | Client-side, on parent app open | Avoids Cloud Functions; safe because ensureWeekInitialized is idempotent |
+| Recurring instance creation | Client-side, on chore save + both dashboards' initState | Avoids Cloud Functions; idempotent per-chore check means no duplicates; child-side init removes dependency on parent opening app first |
 | Score history | Denormalized choreName + choreScore on each instance | Past records stay accurate if chore is later edited |
 | Carryover | Computed at week-doc creation time | Simple; stored explicitly so parents can see and reset it |
 | Sub-screen navigation | Navigator.push (not GoRouter) | Simpler for modal forms; GoRouter handles top-level role routing |
 | Notifications | None (in-app only) | Requested by user; avoids FCM setup complexity |
+
+---
+
+## Firestore Composite Indexes
+
+Defined in `firestore.indexes.json` and deployed via `firebase deploy --only firestore:indexes`.
+
+| Collection | Fields | Scope |
+|---|---|---|
+| `users` | `email`, `isActive` | Collection group |
+| `users` | `role`, `isActive` | Collection |
+| `choreInstances` | `status`, `weekStart` | Collection |
+| `choreInstances` | `claimedBy`, `weekStart` | Collection |
+| `choreInstances` | `claimedBy`, `weekStart`, `status` | Collection |
+
+---
+
+## UI Conventions
+
+- **RTL layout** — never use left/right positioning. Always use:
+  - `EdgeInsetsDirectional` instead of `EdgeInsets.only(left/right)`
+  - `AlignmentDirectional` instead of `Alignment.centerLeft/Right`
+  - `BorderRadiusDirectional` instead of `BorderRadius.only(topLeft/Right)`
+  - `TextAlign.start` instead of `TextAlign.left`
+- **Design tokens** — all colors, spacing, radii, and elevations are defined as `static const` on `AppTheme`. Use `AppTheme.spaceM`, `AppTheme.radiusCard`, etc. rather than hardcoded values.
+- **Numeric text fields** — use `textDirection: TextDirection.ltr` to fix cursor positioning in an RTL context.
 
 ---
 

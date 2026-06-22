@@ -32,6 +32,7 @@ class ChoreRepository {
     required int score,
     required ChoreType type,
     required int frequency,
+    required List<int> days,
     required String createdBy,
   }) async {
     final doc = _chores(familyId).doc();
@@ -43,6 +44,7 @@ class ChoreRepository {
       score: score,
       type: type,
       frequency: frequency,
+      days: days,
       isActive: true,
       createdBy: createdBy,
       createdAt: DateTime.now(),

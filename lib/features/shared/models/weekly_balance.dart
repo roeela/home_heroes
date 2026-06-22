@@ -8,6 +8,7 @@ class WeeklyBalance {
   final int quota;
   final int earned;
   final int carryover; // positive = excess carried in; negative = debt carried in
+  final int rewardedPoints; // excess consumed by rewards this week
 
   const WeeklyBalance({
     required this.id,
@@ -17,11 +18,18 @@ class WeeklyBalance {
     required this.quota,
     this.earned = 0,
     this.carryover = 0,
+    this.rewardedPoints = 0,
   });
 
   int get remaining => quota - earned;
   int get netEarned => earned + carryover;
   bool get metQuota => earned >= quota;
+
+  // Points available to redeem as a real-life reward (zeroed when parent gives reward)
+  int get availableExcess {
+    final net = earned + carryover - quota - rewardedPoints;
+    return net > 0 ? net : 0;
+  }
 
   factory WeeklyBalance.fromFirestore(DocumentSnapshot doc, String familyId) {
     final data = doc.data() as Map<String, dynamic>;
@@ -33,6 +41,7 @@ class WeeklyBalance {
       quota: (data['quota'] as num).toInt(),
       earned: (data['earned'] as num?)?.toInt() ?? 0,
       carryover: (data['carryover'] as num?)?.toInt() ?? 0,
+      rewardedPoints: (data['rewardedPoints'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -42,5 +51,6 @@ class WeeklyBalance {
         'quota': quota,
         'earned': earned,
         'carryover': carryover,
+        'rewardedPoints': rewardedPoints,
       };
 }

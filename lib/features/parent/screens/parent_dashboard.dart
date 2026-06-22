@@ -67,7 +67,7 @@ class _ParentDashboardState extends ConsumerState<ParentDashboard> {
           NavigationDestination(
               icon: Icon(Icons.home_rounded), label: 'סקירה'),
           NavigationDestination(
-              icon: Icon(Icons.list_alt_rounded), label: 'תורנויות'),
+              icon: Icon(Icons.list_alt_rounded), label: 'משימות'),
           NavigationDestination(
               icon: Icon(Icons.check_circle_outline_rounded),
               label: 'אישורים'),
@@ -131,6 +131,7 @@ class _ChildCard extends ConsumerWidget {
     final earned = balance?.earned ?? 0;
     final quota = child.weeklyQuota;
     final carryover = balance?.carryover ?? 0;
+    final excess = balance?.availableExcess ?? 0;
     final progress = quota > 0 ? (earned / quota).clamp(0.0, 1.0) : 0.0;
     final colorScheme = Theme.of(context).colorScheme;
 
@@ -167,42 +168,67 @@ class _ChildCard extends ConsumerWidget {
                 style: TextStyle(
                     fontSize: 12, color: colorScheme.onSurfaceVariant)),
           ]),
-          if (carryover != 0)
+          if (carryover < 0)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                carryover > 0
-                    ? 'עודף משבוע קודם: +$carryover נק׳'
-                    : 'חוב משבוע קודם: $carryover נק׳',
+                'חוב משבוע קודם: $carryover נק׳',
                 style: TextStyle(
                     fontSize: 12,
-                    color: carryover > 0 ? Colors.green[700] : Colors.red[700],
+                    color: Colors.red[700],
                     fontWeight: FontWeight.w500),
               ),
             ),
-          // Reset carryover button (for any parent)
-          if (carryover != 0)
-            Align(
-              alignment: AlignmentDirectional.centerEnd,
-              child: TextButton.icon(
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('אפס יתרה', style: TextStyle(fontSize: 12)),
-                onPressed: () => _resetCarryover(ref, context),
+          if (excess > 0) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.amber[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.shade300),
               ),
+              child: Row(children: [
+                Icon(Icons.stars_rounded, color: Colors.amber[700], size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'עודף לפרס: +$excess נק׳',
+                    style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.amber[800],
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.amber[700],
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    minimumSize: const Size(0, 32),
+                    textStyle: const TextStyle(fontSize: 12),
+                  ),
+                  onPressed: () => _giveReward(ref, context, excess),
+                  child: const Text('תן פרס'),
+                ),
+              ]),
             ),
+          ],
         ]),
       ),
     );
   }
 
-  Future<void> _resetCarryover(WidgetRef ref, BuildContext context) async {
+  Future<void> _giveReward(
+      WidgetRef ref, BuildContext context, int excess) async {
     final user = ref.read(currentFamilyUserProvider).valueOrNull;
     if (user == null) return;
-    await ref.read(balanceRepositoryProvider).resetCarryover(
-        user.familyId, child.email, getWeekStart());
+    await ref.read(balanceRepositoryProvider).giveReward(
+        user.familyId, child.email, getWeekStart(), excess);
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('היתרה אופסה')));
+        SnackBar(
+            content: Text('פרס ניתן ל${child.displayName}! ($excess נק׳)')),
+      );
     }
   }
 }
@@ -223,7 +249,7 @@ class _ChoresTab extends ConsumerWidget {
         data: (chores) {
           if (chores.isEmpty) {
             return const Center(
-              child: Text('אין תורנויות עדיין.\nלחץ + כדי להוסיף.',
+              child: Text('אין משימות עדיין.\nלחץ + כדי להוסיף.',
                   textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
             );
           }
@@ -246,16 +272,31 @@ class _ChoreItem extends ConsumerWidget {
   final Chore chore;
   const _ChoreItem({required this.chore});
 
+  static const _dayNames = {
+    0: 'א׳', 1: 'ב׳', 2: 'ג׳', 3: 'ד׳', 4: 'ה׳', 5: 'ו׳', 6: 'ש׳'
+  };
+
+  (IconData, String) get _typeDisplay {
+    switch (chore.type) {
+      case ChoreType.daily:
+        final label = chore.days.isEmpty
+            ? 'יומי'
+            : chore.days.map((d) => _dayNames[d] ?? '').join(', ');
+        return (Icons.calendar_today_rounded, label);
+      case ChoreType.weekly:
+        return (Icons.repeat_rounded, '${chore.frequency}× בשבוע');
+      case ChoreType.bonus:
+        return (Icons.star_rounded, 'בונוס');
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final (icon, subtitle) = _typeDisplay;
     return ListTile(
-      leading: Icon(chore.type == ChoreType.recurring
-          ? Icons.repeat_rounded
-          : Icons.flash_on_rounded),
+      leading: Icon(icon),
       title: Text(chore.name),
-      subtitle: Text(chore.type == ChoreType.recurring
-          ? '${chore.frequency}× בשבוע'
-          : 'חד-פעמי'),
+      subtitle: Text(subtitle),
       trailing: ScoreChip(score: chore.score),
       onTap: () => Navigator.of(context).push(MaterialPageRoute(
           builder: (_) => ChoreFormScreen(existing: chore))),
@@ -267,7 +308,7 @@ class _ChoreItem extends ConsumerWidget {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('מחיקת תורנות'),
+        title: const Text('מחיקת משימה'),
         content: Text('למחוק את "${chore.name}"?'),
         actions: [
           TextButton(

@@ -13,6 +13,11 @@ class InstanceRepository {
       .doc(familyId)
       .collection('choreInstances');
 
+  // Returns the calendar date for a given day offset within the week.
+  // day: 0=Sun, 1=Mon, …, 6=Sat. weekStart is always a Sunday.
+  DateTime _resolveWeekdayDate(DateTime weekStart, int day) =>
+      DateTime(weekStart.year, weekStart.month, weekStart.day + day);
+
   Stream<List<ChoreInstance>> watchOpenInstances(
       String familyId, DateTime weekStart) {
     return _instances(familyId)
@@ -63,7 +68,7 @@ class InstanceRepository {
       final doc = await txn.get(ref);
       final data = doc.data() as Map<String, dynamic>?;
       if (data == null || data['status'] != 'open') {
-        throw Exception('תורנות זו כבר נתבעה');
+        throw Exception('משימה זו כבר נתפסה');
       }
       txn.update(ref, {
         'status': 'claimed',
@@ -99,39 +104,132 @@ class InstanceRepository {
     });
   }
 
-  /// Creates instances for all recurring chores for the given week if none exist yet.
+  /// Creates instances for all active chores that don't yet have instances this week.
   Future<void> ensureWeekInitialized(
       String familyId, DateTime weekStart, List<Chore> activeChores) async {
     final weekTimestamp = Timestamp.fromDate(weekStart);
     final existing = await _instances(familyId)
         .where('weekStart', isEqualTo: weekTimestamp)
-        .limit(1)
         .get();
 
-    if (existing.docs.isNotEmpty) return;
+    // Build idempotency structures from existing instances.
+    final Set<String> dailyKeys = {}; // '${choreId}_${day}-${month}'
+    final Map<String, int> weeklyCount = {}; // choreId → instance count
+
+    for (final doc in existing.docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      final choreId = data['choreId'] as String;
+      final type = data['choreType'] as String?;
+      final scheduledTs = data['scheduledDate'] as Timestamp?;
+
+      if (type == 'daily' && scheduledTs != null) {
+        final d = scheduledTs.toDate();
+        dailyKeys.add('${choreId}_${d.day}-${d.month}');
+      } else {
+        weeklyCount[choreId] = (weeklyCount[choreId] ?? 0) + 1;
+      }
+    }
 
     final batch = _firestore.batch();
+    var hasChanges = false;
+
     for (final chore in activeChores) {
-      if (chore.type == ChoreType.recurring) {
-        for (int i = 0; i < chore.frequency; i++) {
-          final ref = _instances(familyId).doc();
-          batch.set(
-              ref,
-              ChoreInstance(
-                id: ref.id,
-                familyId: familyId,
-                choreId: chore.id,
-                choreName: chore.name,
-                choreScore: chore.score,
-                weekStart: weekStart,
-              ).toFirestore());
-        }
+      switch (chore.type) {
+        case ChoreType.daily:
+          for (final day in chore.days) {
+            final scheduledDate = _resolveWeekdayDate(weekStart, day);
+            final key = '${chore.id}_${scheduledDate.day}-${scheduledDate.month}';
+            if (!dailyKeys.contains(key)) {
+              final ref = _instances(familyId).doc();
+              batch.set(
+                  ref,
+                  ChoreInstance(
+                    id: ref.id,
+                    familyId: familyId,
+                    choreId: chore.id,
+                    choreName: chore.name,
+                    choreScore: chore.score,
+                    choreType: ChoreType.daily,
+                    weekStart: weekStart,
+                    scheduledDate: scheduledDate,
+                  ).toFirestore());
+              hasChanges = true;
+            }
+          }
+
+        case ChoreType.weekly:
+          final existing = weeklyCount[chore.id] ?? 0;
+          final needed = chore.frequency - existing;
+          for (int i = 0; i < needed; i++) {
+            final ref = _instances(familyId).doc();
+            batch.set(
+                ref,
+                ChoreInstance(
+                  id: ref.id,
+                  familyId: familyId,
+                  choreId: chore.id,
+                  choreName: chore.name,
+                  choreScore: chore.score,
+                  choreType: ChoreType.weekly,
+                  weekStart: weekStart,
+                ).toFirestore());
+            hasChanges = true;
+          }
+
+        case ChoreType.bonus:
+          break; // created manually at form submission time
       }
+    }
+
+    if (hasChanges) await batch.commit();
+  }
+
+  /// Creates one instance per scheduled day for a new daily chore (called at form save).
+  Future<void> createDailyInstancesForWeek(
+      String familyId, Chore chore, DateTime weekStart) async {
+    final batch = _firestore.batch();
+    for (final day in chore.days) {
+      final scheduledDate = _resolveWeekdayDate(weekStart, day);
+      final ref = _instances(familyId).doc();
+      batch.set(
+          ref,
+          ChoreInstance(
+            id: ref.id,
+            familyId: familyId,
+            choreId: chore.id,
+            choreName: chore.name,
+            choreScore: chore.score,
+            choreType: ChoreType.daily,
+            weekStart: weekStart,
+            scheduledDate: scheduledDate,
+          ).toFirestore());
     }
     await batch.commit();
   }
 
-  Future<void> createAdhocInstance(
+  /// Creates `frequency` instances for a new weekly chore (called at form save).
+  Future<void> createWeeklyInstancesForWeek(
+      String familyId, Chore chore, DateTime weekStart) async {
+    final batch = _firestore.batch();
+    for (int i = 0; i < chore.frequency; i++) {
+      final ref = _instances(familyId).doc();
+      batch.set(
+          ref,
+          ChoreInstance(
+            id: ref.id,
+            familyId: familyId,
+            choreId: chore.id,
+            choreName: chore.name,
+            choreScore: chore.score,
+            choreType: ChoreType.weekly,
+            weekStart: weekStart,
+          ).toFirestore());
+    }
+    await batch.commit();
+  }
+
+  /// Creates a single bonus instance immediately (called at form save).
+  Future<void> createBonusInstance(
       String familyId, Chore chore, DateTime weekStart) async {
     final ref = _instances(familyId).doc();
     await ref.set(ChoreInstance(
@@ -140,6 +238,7 @@ class InstanceRepository {
       choreId: chore.id,
       choreName: chore.name,
       choreScore: chore.score,
+      choreType: ChoreType.bonus,
       weekStart: weekStart,
     ).toFirestore());
   }

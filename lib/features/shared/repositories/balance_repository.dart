@@ -60,7 +60,7 @@ class BalanceRepository {
     int carryover = 0;
     if (prevDoc.exists) {
       final prev = WeeklyBalance.fromFirestore(prevDoc, familyId);
-      carryover = prev.earned - prev.quota + prev.carryover;
+      carryover = prev.earned - prev.quota + prev.carryover - prev.rewardedPoints;
     }
 
     final balance = WeeklyBalance(
@@ -82,9 +82,12 @@ class BalanceRepository {
     batch.update(ref, {'earned': FieldValue.increment(points)});
   }
 
-  Future<void> resetCarryover(
-      String familyId, String userId, DateTime weekStart) async {
+  // Consumes all available excess — rewarded points won't carry over to next week.
+  Future<void> giveReward(
+      String familyId, String userId, DateTime weekStart, int excessPoints) async {
     final id = _balanceId(userId, weekStart);
-    await _balances(familyId).doc(id).update({'carryover': 0});
+    await _balances(familyId)
+        .doc(id)
+        .update({'rewardedPoints': FieldValue.increment(excessPoints)});
   }
 }

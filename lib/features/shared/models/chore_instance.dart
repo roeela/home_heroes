@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import 'chore.dart';
+
 enum InstanceStatus { open, claimed, completed, approved, rejected }
 
 class ChoreInstance {
@@ -8,7 +10,9 @@ class ChoreInstance {
   final String choreId;
   final String choreName;
   final int choreScore;
+  final ChoreType choreType; // denormalized from parent Chore
   final DateTime weekStart;
+  final DateTime? scheduledDate; // set for daily instances only (midnight)
   final String? claimedBy; // email of the child who claimed it
   final DateTime? claimedAt;
   final DateTime? completedAt;
@@ -22,7 +26,9 @@ class ChoreInstance {
     required this.choreId,
     required this.choreName,
     required this.choreScore,
+    this.choreType = ChoreType.weekly,
     required this.weekStart,
+    this.scheduledDate,
     this.claimedBy,
     this.claimedAt,
     this.completedAt,
@@ -39,7 +45,9 @@ class ChoreInstance {
       choreId: data['choreId'] as String,
       choreName: data['choreName'] as String,
       choreScore: (data['choreScore'] as num).toInt(),
+      choreType: _parseChoreType(data['choreType'] as String?),
       weekStart: (data['weekStart'] as Timestamp).toDate(),
+      scheduledDate: (data['scheduledDate'] as Timestamp?)?.toDate(),
       claimedBy: data['claimedBy'] as String?,
       claimedAt: (data['claimedAt'] as Timestamp?)?.toDate(),
       completedAt: (data['completedAt'] as Timestamp?)?.toDate(),
@@ -56,7 +64,10 @@ class ChoreInstance {
         'choreId': choreId,
         'choreName': choreName,
         'choreScore': choreScore,
+        'choreType': choreType.name,
         'weekStart': Timestamp.fromDate(weekStart),
+        if (scheduledDate != null)
+          'scheduledDate': Timestamp.fromDate(scheduledDate!),
         if (claimedBy != null) 'claimedBy': claimedBy,
         if (claimedAt != null) 'claimedAt': Timestamp.fromDate(claimedAt!),
         if (completedAt != null)
@@ -65,4 +76,21 @@ class ChoreInstance {
         if (approvedBy != null) 'approvedBy': approvedBy,
         'status': status.name,
       };
+}
+
+ChoreType _parseChoreType(String? s) {
+  switch (s) {
+    case 'daily':
+      return ChoreType.daily;
+    case 'weekly':
+      return ChoreType.weekly;
+    case 'bonus':
+      return ChoreType.bonus;
+    case 'recurring':
+      return ChoreType.weekly;
+    case 'adhoc':
+      return ChoreType.bonus;
+    default:
+      return ChoreType.weekly;
+  }
 }

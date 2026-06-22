@@ -1,8 +1,10 @@
-/// Returns the Monday (start of week) for the given date (or today).
+/// Returns the Sunday (start of week) for the given date (or today).
+/// Israel week: Sunday–Saturday.
 DateTime getWeekStart([DateTime? now]) {
   final date = (now ?? DateTime.now()).toLocal();
-  final daysFromMonday = date.weekday - 1; // Monday = weekday 1
-  return DateTime(date.year, date.month, date.day - daysFromMonday);
+  // DateTime.weekday: Mon=1 … Sun=7. Map to days since Sunday.
+  final daysFromSunday = date.weekday % 7; // Sun=0, Mon=1, … Sat=6
+  return DateTime(date.year, date.month, date.day - daysFromSunday);
 }
 
 /// Human-readable label for a week, e.g. "2/6 - 8/6".
