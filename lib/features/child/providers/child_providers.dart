@@ -8,42 +8,57 @@ import '../../shared/models/chore_instance.dart';
 import '../../shared/models/family_user.dart';
 import '../../shared/models/weekly_balance.dart';
 
+// The Sunday of the current Israel week — still used for balance docs and lookback.
 final currentWeekStartProvider = Provider<DateTime>((_) => getWeekStart());
 
-// All instances for the current week — used to compute pool availability.
+// Midnight of today — start of the rolling 7-day window.
+final todayProvider = Provider<DateTime>((_) {
+  final n = DateTime.now();
+  return DateTime(n.year, n.month, n.day);
+});
+
+// End of the rolling window: today + 6 days (inclusive).
+final windowEndProvider = Provider<DateTime>((ref) {
+  final today = ref.watch(todayProvider);
+  return today.add(const Duration(days: 6));
+});
+
+// All instances whose registeredDay falls in [today, today+6].
+// Used to compute pool availability for the day picker.
 final weekAllInstancesProvider = StreamProvider<List<ChoreInstance>>((ref) {
   final user = ref.watch(currentFamilyUserProvider).valueOrNull;
   if (user == null) return Stream.value([]);
-  final weekStart = ref.watch(currentWeekStartProvider);
+  final today = ref.watch(todayProvider);
+  final end = ref.watch(windowEndProvider);
   return ref
       .watch(instanceRepositoryProvider)
-      .watchWeekInstances(user.familyId, weekStart);
+      .watchWindowInstances(user.familyId, today, end);
 });
 
-// This child's own registrations for the current week.
+// This child's own registrations from the current week start through today+6.
+// Starts at currentWeekStart so completed/approved items from earlier this week
+// remain visible in the My Tasks tab.
 final myRegistrationsProvider = StreamProvider<List<ChoreInstance>>((ref) {
   final user = ref.watch(currentFamilyUserProvider).valueOrNull;
   if (user == null) return Stream.value([]);
   final weekStart = ref.watch(currentWeekStartProvider);
+  final end = ref.watch(windowEndProvider);
   return ref
       .watch(instanceRepositoryProvider)
-      .watchMyRegistrations(user.familyId, user.email, weekStart);
+      .watchMyRegistrations(user.familyId, user.email, weekStart, end);
 });
 
-// Active chores visible to this child this week.
+// Active chores visible to this child in the rolling window.
 // weeklyPool: always visible while active.
-// specificDay: visible only if choreWeekStart matches the current week.
+// specificDay: visible if any scheduledDate falls in [today, today+6].
 final visibleChoresProvider = Provider<List<Chore>>((ref) {
   final allChores = ref.watch(choreListProvider).valueOrNull ?? [];
-  final weekStart = ref.watch(currentWeekStartProvider);
+  final today = ref.watch(todayProvider);
+  final end = ref.watch(windowEndProvider);
   return allChores.where((chore) {
     if (chore.type == ChoreType.weeklyPool) return true;
-    // specificDay: only show for the week it was created for
-    final cws = chore.choreWeekStart;
-    if (cws == null) return false;
-    return cws.year == weekStart.year &&
-        cws.month == weekStart.month &&
-        cws.day == weekStart.day;
+    return chore.scheduledDates.any(
+        (d) => !d.isBefore(today) && !d.isAfter(end));
   }).toList();
 });
 

@@ -9,9 +9,8 @@ class Chore {
   final String description;
   final int score;
   final ChoreType type;
-  final int availablePerWeek; // weeklyPool: 1–7; specificDay: scheduledDays.length
-  final List<int> scheduledDays; // specificDay only: 0=Sun … 6=Sat
-  final DateTime? choreWeekStart; // specificDay only: Sunday of the week it was created for
+  final int availablePerWeek; // weeklyPool: 1–7; specificDay: scheduledDates.length
+  final List<DateTime> scheduledDates; // specificDay only: actual calendar dates
   final bool isActive;
   final String createdBy;
   final DateTime createdAt;
@@ -24,8 +23,7 @@ class Chore {
     required this.score,
     required this.type,
     this.availablePerWeek = 1,
-    this.scheduledDays = const [],
-    this.choreWeekStart,
+    this.scheduledDates = const [],
     this.isActive = true,
     required this.createdBy,
     required this.createdAt,
@@ -43,11 +41,10 @@ class Chore {
       score: (data['score'] as num).toInt(),
       type: type,
       availablePerWeek: (data['availablePerWeek'] as num?)?.toInt() ?? 1,
-      scheduledDays: (data['scheduledDays'] as List<dynamic>?)
-              ?.map((e) => (e as num).toInt())
+      scheduledDates: (data['scheduledDates'] as List<dynamic>?)
+              ?.map((e) => (e as Timestamp).toDate())
               .toList() ??
           [],
-      choreWeekStart: (data['choreWeekStart'] as Timestamp?)?.toDate(),
       isActive: data['isActive'] as bool? ?? true,
       createdBy: data['createdBy'] as String? ?? '',
       createdAt: (data['createdAt'] as Timestamp).toDate(),
@@ -60,9 +57,7 @@ class Chore {
         'score': score,
         'type': type.name,
         'availablePerWeek': availablePerWeek,
-        'scheduledDays': scheduledDays,
-        if (choreWeekStart != null)
-          'choreWeekStart': Timestamp.fromDate(choreWeekStart!),
+        'scheduledDates': scheduledDates.map(Timestamp.fromDate).toList(),
         'isActive': isActive,
         'createdBy': createdBy,
         'createdAt': Timestamp.fromDate(createdAt),

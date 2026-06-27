@@ -26,8 +26,7 @@ class ChoreRepository {
     required int score,
     required ChoreType type,
     required int availablePerWeek,
-    required List<int> scheduledDays,
-    DateTime? choreWeekStart,
+    required List<DateTime> scheduledDates,
     required String createdBy,
   }) async {
     final doc = _chores(familyId).doc();
@@ -39,8 +38,7 @@ class ChoreRepository {
       score: score,
       type: type,
       availablePerWeek: availablePerWeek,
-      scheduledDays: scheduledDays,
-      choreWeekStart: choreWeekStart,
+      scheduledDates: scheduledDates,
       isActive: true,
       createdBy: createdBy,
       createdAt: DateTime.now(),

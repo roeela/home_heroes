@@ -9,6 +9,7 @@ class WeeklyBalance {
   final int earned;
   final int carryover; // positive = excess carried in; negative = debt carried in
   final int rewardedPoints; // excess consumed by rewards this week
+  final bool pendingClaim; // child has requested a bonus award
 
   const WeeklyBalance({
     required this.id,
@@ -19,6 +20,7 @@ class WeeklyBalance {
     this.earned = 0,
     this.carryover = 0,
     this.rewardedPoints = 0,
+    this.pendingClaim = false,
   });
 
   int get remaining => quota - earned;
@@ -42,6 +44,7 @@ class WeeklyBalance {
       earned: (data['earned'] as num?)?.toInt() ?? 0,
       carryover: (data['carryover'] as num?)?.toInt() ?? 0,
       rewardedPoints: (data['rewardedPoints'] as num?)?.toInt() ?? 0,
+      pendingClaim: (data['pendingClaim'] as bool?) ?? false,
     );
   }
 
@@ -52,5 +55,6 @@ class WeeklyBalance {
         'earned': earned,
         'carryover': carryover,
         'rewardedPoints': rewardedPoints,
+        'pendingClaim': pendingClaim,
       };
 }

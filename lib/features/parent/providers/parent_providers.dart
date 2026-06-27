@@ -32,10 +32,9 @@ final choreListProvider = StreamProvider<List<Chore>>((ref) {
 final pendingApprovalProvider = StreamProvider<List<ChoreInstance>>((ref) {
   final user = ref.watch(currentFamilyUserProvider).valueOrNull;
   if (user == null) return Stream.value([]);
-  final weekStart = getWeekStart();
   return ref
       .watch(instanceRepositoryProvider)
-      .watchPendingApproval(user.familyId, weekStart);
+      .watchPendingApproval(user.familyId);
 });
 
 final childrenProvider = StreamProvider<List<FamilyUser>>((ref) {
@@ -56,6 +55,12 @@ final childrenBalancesProvider = StreamProvider<List<WeeklyBalance>>((ref) {
       .watchChildrenBalances(user.familyId, emails, weekStart);
 });
 
+// Balances where the child has an active bonus claim request this week.
+final pendingBonusClaimsProvider = Provider<List<WeeklyBalance>>((ref) {
+  final balances = ref.watch(childrenBalancesProvider).valueOrNull ?? [];
+  return balances.where((b) => b.pendingClaim && b.availableExcess > 0).toList();
+});
+
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 Future<void> approveChore(WidgetRef ref, ChoreInstance instance) async {
@@ -67,7 +72,9 @@ Future<void> approveChore(WidgetRef ref, ChoreInstance instance) async {
       children.where((c) => c.email == instance.registeredBy).firstOrNull;
   if (child == null) return;
 
-  final weekStart = getWeekStart();
+  // Use the week the chore was registered for, not necessarily the current week.
+  // This ensures cross-week approvals credit the correct balance.
+  final weekStart = getWeekStart(instance.registeredDay);
   final balanceRepo = ref.read(balanceRepositoryProvider);
   await balanceRepo.ensureBalanceDoc(
       user.familyId, child.email, weekStart, child.weeklyQuota);

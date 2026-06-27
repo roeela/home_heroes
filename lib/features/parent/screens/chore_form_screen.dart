@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/utils/week_utils.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../parent/providers/parent_providers.dart';
 import '../../shared/models/chore.dart';
@@ -23,12 +22,21 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
   final _scoreCtrl = TextEditingController();
   final _availableCtrl = TextEditingController();
   ChoreType _type = ChoreType.weeklyPool;
-  List<int> _selectedDays = [];
+  // specificDay: actual calendar dates selected from the rolling 7-day window.
+  List<DateTime> _selectedDates = [];
   bool _saving = false;
+
+  // The next 7 calendar days (today through today+6).
+  late final List<DateTime> _nextSevenDays;
 
   @override
   void initState() {
     super.initState();
+    final today = DateTime.now();
+    final todayMidnight = DateTime(today.year, today.month, today.day);
+    _nextSevenDays =
+        List.generate(7, (i) => todayMidnight.add(Duration(days: i)));
+
     final c = widget.existing;
     if (c != null) {
       _nameCtrl.text = c.name;
@@ -36,7 +44,10 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
       _scoreCtrl.text = c.score.toString();
       _availableCtrl.text = c.availablePerWeek.toString();
       _type = c.type;
-      _selectedDays = List<int>.from(c.scheduledDays);
+      // Keep only dates that are still in the future (>= today) for editing.
+      _selectedDates = c.scheduledDates
+          .where((d) => !d.isBefore(todayMidnight))
+          .toList();
     } else {
       _scoreCtrl.text = '10';
       _availableCtrl.text = '1';
@@ -56,7 +67,7 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) return;
 
-    if (_type == ChoreType.specificDay && _selectedDays.isEmpty) {
+    if (_type == ChoreType.specificDay && _selectedDates.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('יש לבחור לפחות יום אחד למשימה ביום ספציפי')),
       );
@@ -66,18 +77,15 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
     final score = int.tryParse(_scoreCtrl.text) ?? 10;
 
     int availablePerWeek;
-    List<int> scheduledDays;
-    DateTime? choreWeekStart;
+    List<DateTime> scheduledDates;
 
     if (_type == ChoreType.weeklyPool) {
       availablePerWeek =
           (int.tryParse(_availableCtrl.text) ?? 1).clamp(1, 7);
-      scheduledDays = [];
-      choreWeekStart = null;
+      scheduledDates = [];
     } else {
-      scheduledDays = List<int>.from(_selectedDays)..sort();
-      availablePerWeek = scheduledDays.length;
-      choreWeekStart = getWeekStart();
+      scheduledDates = List<DateTime>.from(_selectedDates)..sort();
+      availablePerWeek = scheduledDates.length;
     }
 
     setState(() => _saving = true);
@@ -93,8 +101,7 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
           score: score,
           type: _type,
           availablePerWeek: availablePerWeek,
-          scheduledDays: scheduledDays,
-          choreWeekStart: choreWeekStart,
+          scheduledDates: scheduledDates,
           createdBy: user.email,
         );
       } else {
@@ -106,8 +113,7 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
           score: score,
           type: _type,
           availablePerWeek: availablePerWeek,
-          scheduledDays: scheduledDays,
-          choreWeekStart: choreWeekStart ?? widget.existing!.choreWeekStart,
+          scheduledDates: scheduledDates,
           isActive: true,
           createdBy: widget.existing!.createdBy,
           createdAt: widget.existing!.createdAt,
@@ -184,25 +190,31 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
             ],
             if (_type == ChoreType.specificDay) ...[
               const SizedBox(height: 16),
-              const Text('ימים זמינים השבוע:', style: TextStyle(fontSize: 14)),
+              const Text('ימים זמינים (7 ימים הקרובים):',
+                  style: TextStyle(fontSize: 14)),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
-                children: List.generate(7, (day) {
-                  final selected = _selectedDays.contains(day);
+                runSpacing: 8,
+                children: _nextSevenDays.map((date) {
+                  final selected = _selectedDates
+                      .any((d) => _sameDay(d, date));
+                  final label =
+                      '${_dayLabels[date.weekday % 7]} ${date.day}/${date.month}';
                   return FilterChip(
-                    label: Text(_dayLabels[day]),
+                    label: Text(label),
                     selected: selected,
                     onSelected: (on) => setState(() {
                       if (on) {
-                        _selectedDays.add(day);
-                        _selectedDays.sort();
+                        _selectedDates.add(date);
+                        _selectedDates.sort();
                       } else {
-                        _selectedDays.remove(day);
+                        _selectedDates
+                            .removeWhere((d) => _sameDay(d, date));
                       }
                     }),
                   );
-                }),
+                }).toList(),
               ),
             ],
             const SizedBox(height: 28),
@@ -216,3 +228,6 @@ class _ChoreFormScreenState extends ConsumerState<ChoreFormScreen> {
     );
   }
 }
+
+bool _sameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;

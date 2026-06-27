@@ -82,13 +82,21 @@ class BalanceRepository {
     batch.update(ref, {'earned': FieldValue.increment(points)});
   }
 
-  // Consumes all available excess — rewarded points won't carry over to next week.
+  // Child requests a bonus award — parent sees this in the Approvals tab.
+  Future<void> requestBonus(
+      String familyId, String userId, DateTime weekStart) async {
+    final id = _balanceId(userId, weekStart);
+    await _balances(familyId).doc(id).update({'pendingClaim': true});
+  }
+
+  // Consumes all available excess and clears the pending claim.
   Future<void> giveReward(
       String familyId, String userId, DateTime weekStart, int excessPoints) async {
     final id = _balanceId(userId, weekStart);
-    await _balances(familyId)
-        .doc(id)
-        .update({'rewardedPoints': FieldValue.increment(excessPoints)});
+    await _balances(familyId).doc(id).update({
+      'rewardedPoints': FieldValue.increment(excessPoints),
+      'pendingClaim': false,
+    });
   }
 
   /// Deletes all weekly balance documents for a user. Used by the admin reset flow.

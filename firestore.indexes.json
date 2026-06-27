@@ -20,16 +20,8 @@
       "collectionGroup": "choreInstances",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "weekStart", "order": "ASCENDING" },
-        { "fieldPath": "status", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "choreInstances",
-      "queryScope": "COLLECTION",
-      "fields": [
         { "fieldPath": "registeredBy", "order": "ASCENDING" },
-        { "fieldPath": "weekStart", "order": "ASCENDING" }
+        { "fieldPath": "registeredDay", "order": "ASCENDING" }
       ]
     },
     {
@@ -37,8 +29,7 @@
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "choreId", "order": "ASCENDING" },
-        { "fieldPath": "registeredDay", "order": "ASCENDING" },
-        { "fieldPath": "weekStart", "order": "ASCENDING" }
+        { "fieldPath": "registeredDay", "order": "ASCENDING" }
       ]
     }
   ],

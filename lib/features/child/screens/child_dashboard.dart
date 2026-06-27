@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -18,10 +20,6 @@ bool _sameDay(DateTime a, DateTime b) =>
 
 // Midnight of the calendar day containing [dt].
 DateTime _dayMidnight(DateTime dt) => DateTime(dt.year, dt.month, dt.day);
-
-// The calendar date for weekday offset [dayIndex] (0=Sun) within [weekStart].
-DateTime _weekDay(DateTime weekStart, int dayIndex) =>
-    DateTime(weekStart.year, weekStart.month, weekStart.day + dayIndex);
 
 class ChildDashboard extends ConsumerStatefulWidget {
   const ChildDashboard({super.key});
@@ -95,6 +93,7 @@ class _HomeTab extends ConsumerWidget {
     final weekInstancesAsync = ref.watch(weekAllInstancesProvider);
     final user = ref.watch(currentFamilyUserProvider).valueOrNull;
     final weekStart = ref.watch(currentWeekStartProvider);
+    final today = ref.watch(todayProvider);
 
     return balanceAsync.when(
       loading: () => const AppLoading(),
@@ -104,7 +103,7 @@ class _HomeTab extends ConsumerWidget {
         final earned = balance?.earned ?? 0;
         final carryover = balance?.carryover ?? 0;
         final excess = balance?.availableExcess ?? 0;
-        final progress = quota > 0 ? (earned / quota).clamp(0.0, 1.0) : 0.0;
+        final pendingClaim = balance?.pendingClaim ?? false;
         final colorScheme = Theme.of(context).colorScheme;
         final weekInstances = weekInstancesAsync.valueOrNull ?? [];
         final childEmail = user?.email ?? '';
@@ -126,10 +125,15 @@ class _HomeTab extends ConsumerWidget {
                   height: 180,
                   child: Stack(alignment: Alignment.center, children: [
                     SizedBox.expand(
-                      child: CircularProgressIndicator(
-                        value: progress,
-                        strokeWidth: 12,
-                        backgroundColor: colorScheme.surfaceContainerHighest,
+                      child: CustomPaint(
+                        painter: _QuotaRingPainter(
+                          quota: quota,
+                          earned: earned,
+                          trackColor: colorScheme.surfaceContainerHighest,
+                          quotaColor: colorScheme.primary,
+                          excessColor: Colors.amber[600]!,
+                          strokeWidth: 12,
+                        ),
                       ),
                     ),
                     Column(mainAxisSize: MainAxisSize.min, children: [
@@ -137,7 +141,9 @@ class _HomeTab extends ConsumerWidget {
                           style: TextStyle(
                               fontSize: 40,
                               fontWeight: FontWeight.bold,
-                              color: colorScheme.primary)),
+                              color: earned > quota
+                                  ? Colors.amber[700]!
+                                  : colorScheme.primary)),
                       Text('מתוך $quota נק׳',
                           style: TextStyle(
                               fontSize: 13,
@@ -148,7 +154,7 @@ class _HomeTab extends ConsumerWidget {
               ),
               const SizedBox(height: 16),
               _StatRow(
-                  label: 'הרוויחת השבוע',
+                  label: 'הרווחת השבוע',
                   value: '$earned נקודות',
                   icon: Icons.star_rounded,
                   color: colorScheme.primary),
@@ -174,11 +180,12 @@ class _HomeTab extends ConsumerWidget {
               ],
               if (excess > 0) ...[
                 const SizedBox(height: 8),
-                _StatRow(
-                    label: 'נקודות לפרס',
-                    value: '+$excess נקודות',
-                    icon: Icons.card_giftcard_rounded,
-                    color: Colors.amber[700]!),
+                _BonusRow(
+                  excess: excess,
+                  pendingClaim: pendingClaim,
+                  onClaim: () => _requestBonus(ref, context, user!.familyId,
+                      user.email, weekStart),
+                ),
               ],
               if (earned >= quota && quota > 0) ...[
                 const SizedBox(height: 16),
@@ -194,10 +201,12 @@ class _HomeTab extends ConsumerWidget {
                     children: [
                       Icon(Icons.celebration_rounded, color: Colors.green),
                       SizedBox(width: 8),
-                      Text('כל הכבוד! השלמת את המכסה השבועית! 🎉',
-                          style: TextStyle(
-                              color: Colors.green,
-                              fontWeight: FontWeight.bold)),
+                      Flexible(
+                        child: Text('כל הכבוד! השלמת את המכסה השבועית! 🎉',
+                            style: TextStyle(
+                                color: Colors.green,
+                                fontWeight: FontWeight.bold)),
+                      ),
                     ],
                   ),
                 ),
@@ -210,13 +219,13 @@ class _HomeTab extends ConsumerWidget {
               if (weekInstancesAsync.isLoading)
                 const Center(child: CircularProgressIndicator())
               else if (chores.isEmpty)
-                _EmptySection(label: 'אין משימות זמינות השבוע')
+                _EmptySection(label: 'אין משימות זמינות')
               else
                 ...chores.map((chore) => _ChoreCard(
                       chore: chore,
-                      weekInstances: weekInstances,
+                      windowInstances: weekInstances,
                       childEmail: childEmail,
-                      weekStart: weekStart,
+                      today: today,
                     )),
 
               const SizedBox(height: 16),
@@ -231,39 +240,78 @@ class _HomeTab extends ConsumerWidget {
 // A card for a single chore showing availability + child's own registrations.
 class _ChoreCard extends StatelessWidget {
   final Chore chore;
-  final List<ChoreInstance> weekInstances;
+  final List<ChoreInstance> windowInstances;
   final String childEmail;
-  final DateTime weekStart;
+  final DateTime today;
 
   const _ChoreCard({
     required this.chore,
-    required this.weekInstances,
+    required this.windowInstances,
     required this.childEmail,
-    required this.weekStart,
+    required this.today,
   });
 
   @override
   Widget build(BuildContext context) {
-    final activeForChore = weekInstances
+    final activeForChore = windowInstances
         .where((i) => i.choreId == chore.id && i.isActiveSlot)
         .toList();
     final myActive = activeForChore
         .where((i) => i.registeredBy == childEmail)
         .toList();
-    final usedSlots = activeForChore.length;
-    final remaining = chore.availablePerWeek - usedSlots;
 
-    final myDays = myActive
-        .map((i) => '${_dayAbbr[i.registeredDay.weekday % 7]} ${i.registeredDay.day}/${i.registeredDay.month}')
-        .join(', ');
+    final String subtitle;
+    final bool isPoolFull;
 
-    final subtitle = myDays.isNotEmpty
-        ? 'שלי: $myDays'
-        : remaining > 0
-            ? 'נשארו $remaining מקומות'
+    if (chore.type == ChoreType.weeklyPool) {
+      // Pool is per calendar week — check both weeks in the window.
+      final thisWeekStart = getWeekStart(today);
+      final nextWeekStart = thisWeekStart.add(const Duration(days: 7));
+      final usedThisWeek = activeForChore
+          .where((i) => getWeekStart(i.registeredDay) == thisWeekStart)
+          .length;
+      final usedNextWeek = activeForChore
+          .where((i) => getWeekStart(i.registeredDay) == nextWeekStart)
+          .length;
+      final remainingThisWeek = chore.availablePerWeek - usedThisWeek;
+      final remainingNextWeek = chore.availablePerWeek - usedNextWeek;
+
+      // Window spans two weeks unless today is Sunday.
+      final isSunday = today.weekday == DateTime.sunday;
+
+      if (myActive.isNotEmpty) {
+        final myDays = myActive
+            .map((i) =>
+                '${_dayAbbr[i.registeredDay.weekday % 7]} ${i.registeredDay.day}/${i.registeredDay.month}')
+            .join(', ');
+        subtitle = 'שלי: $myDays';
+        isPoolFull = false;
+      } else if (isSunday) {
+        subtitle = remainingThisWeek > 0
+            ? 'נשארו $remainingThisWeek מקומות'
             : 'אין מקומות פנויים';
-
-    final isPoolFull = remaining <= 0 && myActive.isEmpty;
+        isPoolFull = remainingThisWeek <= 0;
+      } else {
+        final anyRemaining =
+            remainingThisWeek > 0 || remainingNextWeek > 0;
+        subtitle = anyRemaining ? 'יש מקומות פנויים' : 'אין מקומות פנויים';
+        isPoolFull = !anyRemaining;
+      }
+    } else {
+      // specificDay: availablePerWeek == scheduledDates.length; one slot per date.
+      final remaining = chore.availablePerWeek - activeForChore.length;
+      if (myActive.isNotEmpty) {
+        final myDays = myActive
+            .map((i) =>
+                '${_dayAbbr[i.registeredDay.weekday % 7]} ${i.registeredDay.day}/${i.registeredDay.month}')
+            .join(', ');
+        subtitle = 'שלי: $myDays';
+        isPoolFull = false;
+      } else {
+        subtitle = remaining > 0 ? 'נשארו $remaining מקומות' : 'אין מקומות פנויים';
+        isPoolFull = remaining <= 0 && myActive.isEmpty;
+      }
+    }
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -296,9 +344,9 @@ class _ChoreCard extends StatelessWidget {
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (_) => _DayPickerSheet(
         chore: chore,
-        weekInstances: weekInstances,
+        windowInstances: windowInstances,
         childEmail: childEmail,
-        weekStart: weekStart,
+        today: today,
       ),
     );
   }
@@ -307,30 +355,89 @@ class _ChoreCard extends StatelessWidget {
 // Bottom sheet for selecting (or unselecting) registration days.
 class _DayPickerSheet extends ConsumerWidget {
   final Chore chore;
-  final List<ChoreInstance> weekInstances;
+  final List<ChoreInstance> windowInstances;
   final String childEmail;
-  final DateTime weekStart;
+  final DateTime today;
 
   const _DayPickerSheet({
     required this.chore,
-    required this.weekInstances,
+    required this.windowInstances,
     required this.childEmail,
-    required this.weekStart,
+    required this.today,
   });
+
+  // Count active instances for a chore within a specific calendar week.
+  int _usedInWeek(
+      List<ChoreInstance> active, String choreId, DateTime weekStart) {
+    return active
+        .where((i) =>
+            i.choreId == choreId &&
+            getWeekStart(i.registeredDay) == weekStart)
+        .length;
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final today = _dayMidnight(DateTime.now());
-    final activeForChore = weekInstances
+    final activeForChore = windowInstances
         .where((i) => i.choreId == chore.id && i.isActiveSlot)
         .toList();
-    final usedSlots = activeForChore.length;
-    final remaining = chore.availablePerWeek - usedSlots;
 
-    // Which day indices to show
-    final List<int> dayIndices = chore.type == ChoreType.weeklyPool
-        ? List.generate(7, (i) => i)
-        : chore.scheduledDays;
+    // Build the list of calendar days to display.
+    final List<DateTime> days;
+    if (chore.type == ChoreType.weeklyPool) {
+      days = List.generate(7, (i) => today.add(Duration(days: i)));
+    } else {
+      // specificDay: only show scheduled dates that are in the window.
+      final windowEnd = today.add(const Duration(days: 6));
+      days = chore.scheduledDates
+          .where((d) => !d.isBefore(today) && !d.isAfter(windowEnd))
+          .toList()
+        ..sort();
+    }
+
+    // Slot-availability summary for the header.
+    final Widget headerSlotText;
+    if (chore.type == ChoreType.weeklyPool) {
+      final isSunday = today.weekday == DateTime.sunday;
+      final thisWeekStart = getWeekStart(today);
+      final usedThisWeek =
+          _usedInWeek(activeForChore, chore.id, thisWeekStart);
+      final remainingThisWeek = chore.availablePerWeek - usedThisWeek;
+
+      if (isSunday) {
+        headerSlotText = Text(
+          remainingThisWeek > 0
+              ? 'נשארו $remainingThisWeek מקומות פנויים'
+              : 'כל המקומות תפוסים',
+          style: TextStyle(
+              fontSize: 13,
+              color: remainingThisWeek > 0
+                  ? Colors.green[700]
+                  : Colors.red[700]),
+        );
+      } else {
+        final nextWeekStart =
+            thisWeekStart.add(const Duration(days: 7));
+        final usedNextWeek =
+            _usedInWeek(activeForChore, chore.id, nextWeekStart);
+        final remainingNextWeek = chore.availablePerWeek - usedNextWeek;
+        headerSlotText = Text(
+          'השבוע: $remainingThisWeek פנויים / שבוע הבא: $remainingNextWeek פנויים',
+          style: TextStyle(
+              fontSize: 13, color: Theme.of(context).colorScheme.onSurfaceVariant),
+        );
+      }
+    } else {
+      final remaining = chore.availablePerWeek - activeForChore.length;
+      headerSlotText = Text(
+        remaining > 0
+            ? 'נשארו $remaining מקומות פנויים'
+            : 'כל המקומות תפוסים',
+        style: TextStyle(
+            fontSize: 13,
+            color: remaining > 0 ? Colors.green[700] : Colors.red[700]),
+      );
+    }
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
@@ -353,38 +460,44 @@ class _DayPickerSheet extends ConsumerWidget {
               style:
                   const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
-          Text(
-            remaining > 0
-                ? 'נשארו $remaining מקומות פנויים'
-                : 'כל המקומות תפוסים',
-            style: TextStyle(
-                fontSize: 13,
-                color: remaining > 0 ? Colors.green[700] : Colors.red[700]),
-          ),
+          headerSlotText,
           const SizedBox(height: 16),
           Wrap(
             spacing: 8,
             runSpacing: 8,
-            children: dayIndices.map((dayIdx) {
-              final day = _weekDay(weekStart, dayIdx);
+            children: days.map((day) {
               final dayMidnight = _dayMidnight(day);
               final isPast = dayMidnight.isBefore(today);
+
+              // Per-week pool check for this specific day.
+              final dayWeekStart = getWeekStart(day);
+              final usedInDayWeek =
+                  _usedInWeek(activeForChore, chore.id, dayWeekStart);
+              final poolFullForWeek =
+                  usedInDayWeek >= chore.availablePerWeek;
+
               final myInstance = activeForChore
                   .where((i) =>
                       i.registeredBy == childEmail &&
                       _sameDay(i.registeredDay, dayMidnight))
                   .firstOrNull;
               final isMine = myInstance != null;
+              final isApproved =
+                  myInstance?.status == InstanceStatus.approved;
               final takenByOther = activeForChore.any((i) =>
                   i.registeredBy != childEmail &&
                   _sameDay(i.registeredDay, dayMidnight));
-              final isPoolFull = remaining <= 0 && !isMine;
+              final isPoolFull = poolFullForWeek && !isMine;
               final isDisabled = isPast || takenByOther || isPoolFull;
 
               final label =
-                  '${_dayAbbr[dayIdx]}\n${day.day}/${day.month}';
+                  '${_dayAbbr[day.weekday % 7]}\n${day.day}/${day.month}';
 
               if (isMine) {
+                // Approved slots are permanently locked — no unregister.
+                if (isApproved) {
+                  return _DayChip(label: label, state: _ChipState.taken);
+                }
                 return _DayChip(
                   label: label,
                   state: _ChipState.mine,
@@ -425,7 +538,7 @@ class _DayPickerSheet extends ConsumerWidget {
     try {
       await ref
           .read(instanceRepositoryProvider)
-          .registerForDay(user.familyId, chore, day, user.email, weekStart);
+          .registerForDay(user.familyId, chore, day, user.email);
       if (context.mounted) Navigator.of(context).pop();
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -551,6 +664,80 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
+class _QuotaRingPainter extends CustomPainter {
+  final int quota;
+  final int earned;
+  final Color trackColor;
+  final Color quotaColor;
+  final Color excessColor;
+  final double strokeWidth;
+
+  const _QuotaRingPainter({
+    required this.quota,
+    required this.earned,
+    required this.trackColor,
+    required this.quotaColor,
+    required this.excessColor,
+    required this.strokeWidth,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = (size.shortestSide - strokeWidth) / 2;
+    final startAngle = -math.pi / 2; // 12 o'clock
+    final fullCircle = 2 * math.pi;
+
+    final trackPaint = Paint()
+      ..color = trackColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+
+    final quotaPaint = Paint()
+      ..color = quotaColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.butt;
+
+    final excessPaint = Paint()
+      ..color = excessColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.butt;
+
+    // Track (full circle)
+    canvas.drawArc(Rect.fromCircle(center: center, radius: radius),
+        startAngle, fullCircle, false, trackPaint);
+
+    if (quota <= 0 || earned <= 0) return;
+
+    final total = earned; // total arc represents what was earned
+    final excessAmount = (earned - quota).clamp(0, earned);
+    final quotaAmount = earned - excessAmount;
+
+    final quotaSweep = (quotaAmount / total) * fullCircle;
+    final excessSweep = (excessAmount / total) * fullCircle;
+
+    // Draw quota arc first
+    canvas.drawArc(Rect.fromCircle(center: center, radius: radius),
+        startAngle, quotaSweep, false, quotaPaint);
+
+    // Draw excess arc immediately after
+    if (excessSweep > 0) {
+      canvas.drawArc(Rect.fromCircle(center: center, radius: radius),
+          startAngle + quotaSweep, excessSweep, false, excessPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_QuotaRingPainter old) =>
+      old.quota != quota ||
+      old.earned != earned ||
+      old.quotaColor != quotaColor ||
+      old.excessColor != excessColor;
+}
+
 class _EmptySection extends StatelessWidget {
   final String label;
   const _EmptySection({required this.label});
@@ -563,6 +750,94 @@ class _EmptySection extends StatelessWidget {
           style: TextStyle(
               fontSize: 13,
               color: Theme.of(context).colorScheme.onSurfaceVariant)),
+    );
+  }
+}
+
+Future<void> _requestBonus(WidgetRef ref, BuildContext context,
+    String familyId, String userEmail, DateTime weekStart) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('בקשת פרס'),
+      content: const Text('לשלוח בקשה להורה לממש את העודף כפרס?'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('ביטול')),
+        FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('שלח בקשה')),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+  try {
+    await ref
+        .read(balanceRepositoryProvider)
+        .requestBonus(familyId, userEmail, weekStart);
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('שגיאה: $e')));
+    }
+  }
+}
+
+class _BonusRow extends StatelessWidget {
+  final int excess;
+  final bool pendingClaim;
+  final VoidCallback onClaim;
+
+  const _BonusRow(
+      {required this.excess,
+      required this.pendingClaim,
+      required this.onClaim});
+
+  @override
+  Widget build(BuildContext context) {
+    final amber = Colors.amber[700]!;
+
+    if (pendingClaim) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: amber.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(children: [
+          Icon(Icons.hourglass_top_rounded, color: amber),
+          const SizedBox(width: 12),
+          Expanded(
+              child: Text('בקשת פרס נשלחה להורה',
+                  style: const TextStyle(fontSize: 14))),
+          Text('+$excess נק׳',
+              style: TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.bold, color: amber)),
+        ]),
+      );
+    }
+
+    return GestureDetector(
+      onTap: onClaim,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: amber.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: amber.withValues(alpha: 0.4)),
+        ),
+        child: Row(children: [
+          Icon(Icons.card_giftcard_rounded, color: amber),
+          const SizedBox(width: 12),
+          Expanded(
+              child: Text('נקודות לפרס — לחץ לבקש',
+                  style: const TextStyle(fontSize: 14))),
+          Text('+$excess נק׳',
+              style: TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.bold, color: amber)),
+        ]),
+      ),
     );
   }
 }
@@ -640,7 +915,7 @@ class _MyChoresTab extends ConsumerWidget {
 
         if (!hasAnything) {
           return const Center(
-            child: Text('טרם נרשמת למשימות השבוע.\nלחץ על "הבית" כדי להתחיל.',
+            child: Text('טרם נרשמת למשימות.\nלחץ על "הבית" כדי להתחיל.',
                 textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
           );
         }

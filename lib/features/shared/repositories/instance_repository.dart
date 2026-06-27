@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../../../core/utils/week_utils.dart';
 import '../models/chore.dart';
 import '../models/chore_instance.dart';
 
@@ -13,35 +14,37 @@ class InstanceRepository {
       .doc(familyId)
       .collection('choreInstances');
 
-  // All instances for the current week (all children, all statuses).
-  // Used by the child home screen to compute pool availability.
-  Stream<List<ChoreInstance>> watchWeekInstances(
-      String familyId, DateTime weekStart) {
+  // All instances whose registeredDay falls in [start, end] (inclusive).
+  // Used by the child home screen to compute pool availability for the rolling window.
+  Stream<List<ChoreInstance>> watchWindowInstances(
+      String familyId, DateTime start, DateTime end) {
     return _instances(familyId)
-        .where('weekStart', isEqualTo: Timestamp.fromDate(weekStart))
+        .where('registeredDay',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(start))
+        .where('registeredDay', isLessThanOrEqualTo: Timestamp.fromDate(end))
         .snapshots()
         .map((snap) => snap.docs
             .map((doc) => ChoreInstance.fromFirestore(doc, familyId))
             .toList());
   }
 
-  // A child's own registrations for the current week (all statuses).
+  // A child's own registrations whose registeredDay falls in [start, end].
   Stream<List<ChoreInstance>> watchMyRegistrations(
-      String familyId, String userEmail, DateTime weekStart) {
+      String familyId, String userEmail, DateTime start, DateTime end) {
     return _instances(familyId)
         .where('registeredBy', isEqualTo: userEmail)
-        .where('weekStart', isEqualTo: Timestamp.fromDate(weekStart))
+        .where('registeredDay',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(start))
+        .where('registeredDay', isLessThanOrEqualTo: Timestamp.fromDate(end))
         .snapshots()
         .map((snap) => snap.docs
             .map((doc) => ChoreInstance.fromFirestore(doc, familyId))
             .toList());
   }
 
-  // Completed instances awaiting parent approval (current week only).
-  Stream<List<ChoreInstance>> watchPendingApproval(
-      String familyId, DateTime weekStart) {
+  // All completed instances awaiting parent approval (no week restriction).
+  Stream<List<ChoreInstance>> watchPendingApproval(String familyId) {
     return _instances(familyId)
-        .where('weekStart', isEqualTo: Timestamp.fromDate(weekStart))
         .where('status', isEqualTo: 'completed')
         .snapshots()
         .map((snap) => snap.docs
@@ -50,23 +53,22 @@ class InstanceRepository {
   }
 
   // Register a child for a chore on a specific day.
+  // weekStart is computed from [day] so callers don't need to pass it.
   // Uses a transaction to prevent double-registration on the same day.
   Future<void> registerForDay(
     String familyId,
     Chore chore,
     DateTime day, // midnight local time of the target day
     String childEmail,
-    DateTime weekStart,
   ) async {
     final dayTs = Timestamp.fromDate(day);
-    final weekTs = Timestamp.fromDate(weekStart);
+    final weekStart = getWeekStart(day);
 
     await _firestore.runTransaction((txn) async {
       // Check the day isn't already taken by someone else.
       final existing = await _instances(familyId)
           .where('choreId', isEqualTo: chore.id)
           .where('registeredDay', isEqualTo: dayTs)
-          .where('weekStart', isEqualTo: weekTs)
           .get();
 
       final activeThatDay = existing.docs.where((doc) {

@@ -25,9 +25,10 @@ User email is used as the document ID for user docs (enables O(1) lookup on sign
   name: string
   description: string
   score: number
-  type: 'daily' | 'weekly' | 'bonus'
-  frequency: number                       ← weekly: slots per week; daily: days.length; bonus: 1
-  days: number[]                          ← daily only: weekday list (0=Sun … 6=Sat)
+  type: 'weeklyPool' | 'specificDay'
+  availablePerWeek: number                ← weeklyPool: 1–7; specificDay: scheduledDays.length
+  scheduledDays: number[]                 ← specificDay only: weekday list (0=Sun … 6=Sat)
+  choreWeekStart: timestamp | null        ← specificDay only: Sunday of the week it was created for
   isActive: boolean                       ← false = soft-deleted
   createdBy: string                       ← email of the parent who created it
   createdAt: timestamp
@@ -36,15 +37,15 @@ User email is used as the document ID for user docs (enables O(1) lookup on sign
   choreId: string
   choreName: string                       ← denormalized so old records stay readable
   choreScore: number                      ← denormalized so score changes don't affect past records
-  choreType: 'daily' | 'weekly' | 'bonus' ← denormalized from chore for client-side filtering
+  choreType: 'weeklyPool' | 'specificDay' ← denormalized for client-side filtering
   weekStart: timestamp                    ← Sunday 00:00 local time of the relevant week
-  scheduledDate: timestamp | null         ← daily instances only: the specific calendar day
-  claimedBy: string | null               ← email of the child who claimed it
-  claimedAt: timestamp | null
+  registeredDay: timestamp                ← midnight of the day the child registered for
+  registeredBy: string                    ← email of the child who registered
+  registeredAt: timestamp
   completedAt: timestamp | null
   approvedAt: timestamp | null
   approvedBy: string | null              ← email of the approving parent
-  status: 'open' | 'claimed' | 'completed' | 'approved' | 'rejected'
+  status: 'registered' | 'completed' | 'approved' | 'rejected' | 'cancelled'
 
 /family/{familyId}/weeklyBalances/{userId_weekStartId}
   userId: string                          ← child's email
@@ -53,6 +54,7 @@ User email is used as the document ID for user docs (enables O(1) lookup on sign
   earned: number                          ← sum of choreScore for approved instances
   carryover: number                       ← positive = excess from prev week; negative = debt
   rewardedPoints: number                  ← excess consumed by parent rewards this week
+  pendingClaim: boolean                   ← true when child has requested a bonus award
 ```
 
 ### Document ID conventions
@@ -61,11 +63,6 @@ User email is used as the document ID for user docs (enables O(1) lookup on sign
 - Chores: auto-generated Firestore ID
 - ChoreInstances: auto-generated Firestore ID
 - WeeklyBalances: `{email}_{YYYY-MM-DD}` (e.g. `kid@gmail.com_2024-06-03`)
-
-### Backward compatibility
-Old documents with `type: "recurring"` are read as `weekly`; `type: "adhoc"` as `bonus`.
-Old `choreInstances` without `choreType` default to `weekly`; without `scheduledDate` default to `null`.
-No migration script is needed — `fromFirestore` handles both shapes.
 
 ---
 
@@ -101,62 +98,57 @@ Found?
 
 ## Chore Types & Lifecycle
 
-### Three chore types
+### Two chore types
 
-| Type | Description | Instance creation |
+| Type | Description | Persistence |
 |---|---|---|
-| **daily** | Tied to specific days of the week (e.g. Feed dog every Sun/Wed) | One instance per selected day, with `scheduledDate` set |
-| **weekly** | Flexible — child picks when to do it during the week | `frequency` instances per week, no `scheduledDate` |
-| **bonus** | Optional ad-hoc tasks the parent offers during the week | One instance created immediately on parent save |
+| **weeklyPool** | Parent defines once; children register for day(s) each week | Permanent — appears every week until deleted |
+| **specificDay** | Parent defines for the current week with specific days | One-week only — filtered by `choreWeekStart` |
 
-### Days convention (daily chores)
-`days` stores weekday integers with **0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat**.
-Week starts on **Sunday** (Israel convention). `scheduledDate` is midnight of the calendar day.
+### Days convention
+`scheduledDays` stores weekday integers with **0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat**.
+Week starts on **Sunday** (Israel convention). `registeredDay` is midnight local time of the chosen calendar day.
 
-### Instance workflow
+### Instance status lifecycle
 ```
-Parent creates chore
-    ↓
-Instance(s) created immediately on save:
-  daily  → one instance per day in chore.days, scheduledDate set to each day's date
-  weekly → frequency instances, scheduledDate null
-  bonus  → one instance, scheduledDate null
-    ↓
-Child opens "הבית" tab:
-  daily  → appears in "משימות היום" if scheduledDate matches today
-  weekly/bonus → appears in "זמין השבוע"
-    ↓
-Child taps "קח" → Firestore transaction:
-  checks status == 'open' → sets status='claimed', claimedBy=email
-    ↓
-Child goes to "המשימות שלי" tab → taps "בוצע!"
-  → status='completed'
-    ↓
-Parent sees instance in "Approvals" tab
-    ↓
-Parent taps "אשר" (Approve):
-  1. ensureBalanceDoc() for child this week (creates doc if missing, computes carryover)
-  2. Firestore batch:
-     - instance: status='approved'
-     - weeklyBalance.earned += choreScore
-    ↓
-Child's home tab shows updated progress
+Child registers for a day
+    → status = 'registered'
+        ↓
+Child taps "בוצע!" on that day
+    → status = 'completed'
+        ↓
+Parent approves
+    → status = 'approved'   (points credited to child's weekly balance)
 
-Parent taps "דחה" (Reject):
-  - instance reset to status='open' (claimedBy/claimedAt cleared)
-  - instance returns to available pool
+Parent rejects
+    → status = 'rejected'   (slot freed; no points; hidden from child)
+
+Child unregisters (before day passes)
+    → status = 'cancelled'  (slot freed)
+
+Chore deleted by parent
+    → all registered/completed instances → status = 'cancelled'
 ```
 
-### Week initialization (`ensureWeekInitialized`)
-Called from both `ParentDashboard.initState()` and `ChildDashboard.initState()` on every app open.
-Idempotency is enforced per-instance-slot:
-- **daily**: tracks `(choreId, scheduledDate)` pairs — never creates a duplicate for the same day
-- **weekly**: counts existing instances per choreId — creates only the missing ones up to `frequency`
-- **bonus**: skipped entirely (managed at save time)
+### Pool slot counting
+A slot is **consumed** when `status ∈ {registered, completed, approved}` (`isActiveSlot` getter).
+A slot is **free** when `status ∈ {rejected, cancelled}`.
 
-### Week boundaries
-- Week starts on **Sunday 00:00 local time** (`getWeekStart()` in `week_utils.dart`)
-- `weekStartId()` produces a stable `YYYY-MM-DD` string key used in balance doc IDs
+```
+usedSlots      = count of instances for choreId + weekStart where isActiveSlot == true
+remainingSlots = chore.availablePerWeek - usedSlots
+```
+
+A given calendar day is **taken** if any active-slot instance exists for that chore + day.
+
+### Registration — day locking
+`registerForDay()` runs a Firestore **transaction** that checks for existing active-slot instances on the same `choreId + registeredDay` before creating the new instance. This prevents two children registering the same day even under concurrent taps.
+
+### Delete cascade
+When a parent deletes a chore:
+1. `cancelActiveInstancesForChore()` batch-cancels all `registered`/`completed` instances
+2. `chore.isActive` is set to `false`
+3. Firestore real-time streams on all connected clients update instantly — chore card disappears from child home screen, instances disappear from child My Tasks tab, pending approvals disappear from parent Approvals tab
 
 ---
 
@@ -172,6 +164,7 @@ availableExcess = max(0, earned + carryover - quota - rewardedPoints)
 - `earned` — points approved this week
 - `carryover` — net points carried in from previous week (positive = surplus, negative = debt)
 - `rewardedPoints` — excess consumed by parent rewards this week (prevents double carry-over)
+- `pendingClaim` — set to `true` when the child has tapped "נקודות לפרס" to request a bonus award
 
 ### Carryover calculation
 When `ensureBalanceDoc()` creates a new week's doc, it reads the previous week's balance:
@@ -181,12 +174,28 @@ carryover = previousWeek.earned - previousWeek.quota + previousWeek.carryover - 
 - Positive carryover = accumulated excess (banked points)
 - Negative carryover = deficit that must be made up
 
-### Reward flow
-When a parent taps "תן פרס" on a child card in the Overview tab:
-- `rewardedPoints` is incremented by the current `availableExcess`
-- `availableExcess` becomes 0
-- The rewarded points are excluded from next week's carryover (consumed in real life)
-- The child sees "נקודות לפרס" on their home tab as motivation
+### Bonus claim flow
+```
+Child sees "נקודות לפרס" row on home screen (excess > 0, pendingClaim == false)
+    ↓
+Child taps row → confirmation dialog
+    ↓
+balanceRepo.requestBonus() → sets pendingClaim = true
+    ↓
+Row changes to "בקשת פרס נשלחה להורה" (non-tappable)
+    ↓
+Parent sees "_BonusClaimCard" at top of Approvals tab
+    ↓
+Parent taps "תן פרס"
+    ↓
+balanceRepo.giveReward():
+  - rewardedPoints += availableExcess
+  - pendingClaim = false
+    ↓
+availableExcess becomes 0; child's row disappears
+```
+
+Unspent excess (parent never awards) carries forward to next week via the carryover formula above.
 
 ---
 
@@ -214,7 +223,7 @@ Sub-screens (chore form, add member) use `Navigator.of(context).push(MaterialPag
 
 All providers live in:
 - `features/auth/providers/auth_provider.dart` — Firebase instances, auth state, current user
-- `features/parent/providers/parent_providers.dart` — repository providers + parent streams
+- `features/parent/providers/parent_providers.dart` — repository providers + parent streams + actions
 - `features/child/providers/child_providers.dart` — child-specific streams
 
 No code generation (no `riverpod_annotation` / `build_runner`). All providers are written manually using `Provider`, `StreamProvider`, and `FutureProvider`.
@@ -227,16 +236,20 @@ No code generation (no `riverpod_annotation` / `build_runner`). All providers ar
 | `firestoreProvider` | `Provider<FirebaseFirestore>` | singleton |
 | `authStateProvider` | `StreamProvider<User?>` | Firebase auth state changes |
 | `currentFamilyUserProvider` | `FutureProvider<FamilyUser?>` | resolved Firestore user for current auth |
-| `choreListProvider` | `StreamProvider<List<Chore>>` | active chores for the family |
-| `pendingApprovalProvider` | `StreamProvider<List<ChoreInstance>>` | completed instances awaiting approval |
+| `currentWeekStartProvider` | `Provider<DateTime>` | Sunday midnight of the current week |
+| `choreListProvider` | `StreamProvider<List<Chore>>` | all active chores for the family |
+| `pendingApprovalProvider` | `StreamProvider<List<ChoreInstance>>` | completed instances awaiting approval (current week) |
+| `pendingBonusClaimsProvider` | `Provider<List<WeeklyBalance>>` | balances with `pendingClaim == true` this week |
 | `childrenProvider` | `StreamProvider<List<FamilyUser>>` | active child users |
 | `childrenBalancesProvider` | `StreamProvider<List<WeeklyBalance>>` | all children's balances this week |
-| `openInstancesProvider` | `StreamProvider<List<ChoreInstance>>` | open instances this week; filtered client-side by choreType/scheduledDate for display |
-| `myInstancesProvider` | `StreamProvider<List<ChoreInstance>>` | current child's claimed instances |
+| `weekAllInstancesProvider` | `StreamProvider<List<ChoreInstance>>` | all instances this week (all children, all statuses) — used for pool availability computation |
+| `myRegistrationsProvider` | `StreamProvider<List<ChoreInstance>>` | current child's registrations this week |
+| `visibleChoresProvider` | `Provider<List<Chore>>` | weeklyPool chores always; specificDay chores only if `choreWeekStart` matches current week |
 | `myBalanceStreamProvider` | `StreamProvider<WeeklyBalance?>` | current child's balance this week |
 
-Client-side filtering (no extra Firestore queries or indexes):
-- `openInstancesProvider` result is split in `_HomeTab` into daily-today vs. weekly/bonus lists
+Client-side filtering (no extra Firestore queries):
+- `visibleChoresProvider` filters specificDay chores by `choreWeekStart`
+- `weekAllInstancesProvider` result is used in `_HomeTab` and `_DayPickerSheet` to compute per-chore slot availability and per-day chip states
 
 ---
 
@@ -246,13 +259,18 @@ Client-side filtering (no extra Firestore queries or indexes):
 |---|---|---|
 | User doc ID | email address | Enables O(1) lookup on sign-in without knowing familyId first |
 | Multi-family support | No (single family) | Simpler data model; app is private per household |
-| Chore slot model | Open pool (any child can claim weekly/bonus) | Encourages healthy competition among siblings |
-| Daily task filtering | Client-side on `scheduledDate` | Avoids new Firestore indexes; family-scale data makes this trivial |
+| Registration-based instances | Created only on child registration | Eliminates upfront slot creation; pool availability computed client-side |
+| Pool availability | Client-side count of active instances per choreId per week | Family scale makes this trivial; avoids composite Firestore indexes on type/date |
+| specificDay week scoping | `choreWeekStart` field on Chore | Parent must redefine each week; old chores don't bleed into new weeks |
+| Day locking | Firestore transaction in `registerForDay` | Prevents two children booking the same day under concurrent taps |
+| Rejected instances free the slot | `status = rejected` excluded from `isActiveSlot` | If parent says "you didn't do it", the day slot returns to the family pool |
+| Missed registrations | Client-side filter (hide if `registeredDay < today` and `status == registered`) | No background job needed |
+| Delete cascade | Batch-cancel instances → deactivate chore | Real-time streams propagate instantly to all connected devices |
 | `choreType` on instances | Denormalized | Enables type-based display without a Firestore join |
 | Days convention | 0=Sun…6=Sat | Natural for Israel week (Sun start); avoids Dart's Mon=1…Sun=7 awkwardness |
 | Score history | Denormalized `choreName` + `choreScore` on each instance | Past records stay accurate if chore is later edited |
-| Reward system | `rewardedPoints` field on `WeeklyBalance` | Cleanly separates "consumed" excess from carry-forward; parent gives real-life reward and zeroes the pool |
-| Carryover | Computed at week-doc creation time | Simple; stored explicitly so parents and children can see it |
+| Bonus claim | Child-initiated via tap; parent approves in Approvals tab | Child feels agency; parent has final control; `pendingClaim` flag on balance doc is the simplest possible state machine |
+| Reward system | `rewardedPoints` + `pendingClaim` on `WeeklyBalance` | Cleanly separates "consumed" excess from carry-forward; no separate claim collection needed |
 | Sub-screen navigation | Navigator.push (not GoRouter) | Simpler for modal forms; GoRouter handles top-level role routing |
 | Notifications | None (in-app only) | Intentionally excluded; avoids FCM setup complexity |
 
@@ -266,11 +284,11 @@ Defined in `firestore.indexes.json` and deployed via `firebase deploy --only fir
 |---|---|---|
 | `users` | `email`, `isActive` | Collection group |
 | `users` | `role`, `isActive` | Collection |
-| `choreInstances` | `status`, `weekStart` | Collection |
-| `choreInstances` | `claimedBy`, `weekStart` | Collection |
-| `choreInstances` | `claimedBy`, `weekStart`, `status` | Collection |
+| `choreInstances` | `weekStart`, `status` | Collection |
+| `choreInstances` | `registeredBy`, `weekStart` | Collection |
+| `choreInstances` | `choreId`, `registeredDay`, `weekStart` | Collection |
 
-No indexes are needed for `choreType` or `scheduledDate` — filtering on these fields is done client-side after the existing queries return.
+No indexes are needed for `choreType` or day-of-week filtering — all such filtering is done client-side after the base queries return.
 
 ---
 

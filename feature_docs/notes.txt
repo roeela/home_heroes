@@ -1,2 +1,75 @@
+===== COMMON COMMANDS =====
+
+--- Run & build ---
+
+# Run on connected device / emulator (debug)
+flutter run
+
+# Run on a specific device (get device list first)
+flutter devices
+flutter run -d <device-id>
+
+# Build release APK (unsigned)
+flutter build apk --release
+
+# Build release APK split by ABI (smaller file — recommended)
+flutter build apk --release --split-per-abi
+# Output: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk  (use this for modern phones)
+
+# Build release APK with obfuscation
+flutter build apk --release --obfuscate --split-debug-info=build/debug-info
+
+# Install release APK directly to connected device
+flutter install --release
+
+
+--- Firebase ---
+
+# Deploy Firestore indexes
+firebase deploy --only firestore:indexes
+
+# Deploy Firestore security rules
+firebase deploy --only firestore:rules
+
+# Login / switch project
+firebase login
+firebase use <project-id>
+firebase use --list
+
+
+--- Flutter misc ---
+
+# Clean build cache (fixes weird build errors)
+flutter clean
+flutter pub get
+
+# Check for outdated packages
+flutter pub outdated
+
+# Upgrade packages
+flutter pub upgrade
+
+# Analyze code
+flutter analyze
+
+# Run tests
+flutter test
+
+
+--- Android ---
+
+# Get debug SHA-1 (needed for Firebase Google Sign-In)
+keytool -list -v -keystore %USERPROFILE%\.android\debug.keystore -alias androiddebugkey -storepass android -keypass android
+
+
+===== FIREBASE INDEXES (current) =====
+
 to create indexes:
 firebase deploy --only firestore:indexes
+
+collections covered:
+- users: email + isActive (collection group)
+- users: role + isActive (collection)
+- choreInstances: weekStart + status
+- choreInstances: registeredBy + weekStart
+- choreInstances: choreId + registeredDay + weekStart

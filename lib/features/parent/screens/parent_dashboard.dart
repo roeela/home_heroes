@@ -244,6 +244,7 @@ class _ChoresTab extends ConsumerWidget {
         },
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: 'fab_add_chore',
         onPressed: () => Navigator.of(context).push(
             MaterialPageRoute(builder: (_) => const ChoreFormScreen())),
         child: const Icon(Icons.add),
@@ -265,13 +266,10 @@ class _ChoreItem extends ConsumerWidget {
       case ChoreType.weeklyPool:
         return (Icons.repeat_rounded, 'עד ${chore.availablePerWeek}× בשבוע');
       case ChoreType.specificDay:
-        final days = chore.scheduledDays
-            .map((d) => _dayNames[d] ?? '')
+        final dates = chore.scheduledDates
+            .map((d) => '${_dayNames[d.weekday % 7] ?? ''} ${d.day}/${d.month}')
             .join(', ');
-        final week = chore.choreWeekStart != null
-            ? ' (${chore.choreWeekStart!.day}/${chore.choreWeekStart!.month})'
-            : '';
-        return (Icons.calendar_today_rounded, '$days$week');
+        return (Icons.calendar_today_rounded, dates);
     }
   }
 
@@ -326,26 +324,130 @@ class _ApprovalTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pendingAsync = ref.watch(pendingApprovalProvider);
+    final bonusClaims = ref.watch(pendingBonusClaimsProvider);
     final children = ref.watch(childrenProvider).valueOrNull ?? [];
 
     return pendingAsync.when(
       loading: () => const AppLoading(),
       error: (e, _) => Center(child: Text('שגיאה: $e')),
       data: (instances) {
-        if (instances.isEmpty) {
+        final isEmpty = instances.isEmpty && bonusClaims.isEmpty;
+        if (isEmpty) {
           return const Center(
             child: Text('אין פעולות הממתינות לאישור.',
                 style: TextStyle(fontSize: 16)),
           );
         }
-        return ListView.builder(
+        return ListView(
           padding: const EdgeInsets.all(8),
-          itemCount: instances.length,
-          itemBuilder: (_, i) => _ApprovalCard(
-              instance: instances[i], children: children),
+          children: [
+            if (bonusClaims.isNotEmpty) ...[
+              _SectionLabel(label: 'בקשות פרס'),
+              ...bonusClaims.map((b) => _BonusClaimCard(balance: b, children: children)),
+              if (instances.isNotEmpty) const SizedBox(height: 8),
+            ],
+            if (instances.isNotEmpty) ...[
+              _SectionLabel(label: 'אישור משימות'),
+              ...instances.map((i) => _ApprovalCard(instance: i, children: children)),
+            ],
+          ],
         );
       },
     );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final String label;
+  const _SectionLabel({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Text(label,
+          style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(context).colorScheme.onSurfaceVariant)),
+    );
+  }
+}
+
+class _BonusClaimCard extends ConsumerWidget {
+  final WeeklyBalance balance;
+  final List<FamilyUser> children;
+  const _BonusClaimCard({required this.balance, required this.children});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final childName = children
+            .where((c) => c.email == balance.userId)
+            .firstOrNull
+            ?.displayName ??
+        balance.userId;
+    final excess = balance.availableExcess;
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.card_giftcard_rounded, color: Colors.amber[700]),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(childName,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.amber[100],
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text('+$excess נק׳',
+                  style: TextStyle(
+                      color: Colors.amber[800], fontWeight: FontWeight.bold)),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Text('מבקש/ת לממש עודף נקודות כפרס',
+              style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                  backgroundColor: Colors.amber[700]),
+              onPressed: () => _award(ref, context, excess),
+              icon: const Icon(Icons.star_rounded),
+              label: const Text('תן פרס'),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _award(WidgetRef ref, BuildContext context, int excess) async {
+    final user = ref.read(currentFamilyUserProvider).valueOrNull;
+    if (user == null) return;
+    try {
+      await ref.read(balanceRepositoryProvider).giveReward(
+          user.familyId, balance.userId, balance.weekStart, excess);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('פרס ניתן! ($excess נק׳ מומשו)')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('שגיאה: $e')));
+      }
+    }
   }
 }
 
@@ -516,6 +618,7 @@ class _FamilyTab extends ConsumerWidget {
         ),
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: 'fab_add_member',
         onPressed: () => Navigator.of(context).push(
             MaterialPageRoute(builder: (_) => const AddMemberScreen())),
         child: const Icon(Icons.person_add_rounded),

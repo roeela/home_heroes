@@ -97,24 +97,32 @@ service cloud.firestore {
 
 ## How tasks work
 
-Tasks come in three types:
+Tasks come in two types:
 
 | Type | Hebrew | Description |
 |---|---|---|
-| **Daily** | יומי | Tied to specific days of the week (e.g. Feed dog every Sun/Wed). Children see these in "משימות היום" only on the scheduled day. |
-| **Weekly** | שבועי | Flexible — any child can claim them any time before the week ends. Appear in "זמין השבוע". |
-| **Bonus** | בונוס | Optional one-off tasks a parent adds during the week. Appear in "זמין השבוע" with a star icon. |
+| **Weekly Pool** | שבועי | Parent defines once; persists week-to-week. Set how many times per week (1–7). Children register for specific day(s) — each day holds one child, total capped at `availablePerWeek`. |
+| **Specific Day** | יום ספציפי | Parent defines for the current week only with specific days. Does not carry over. One child per day, first-come-first-served. |
+
+Each chore appears as **a single card** on the child's home screen regardless of how many slots it has.
+
+### Registration flow
+- Child taps a chore card → day-picker bottom sheet opens
+- Child taps an available day to register (or taps their own day to unregister)
+- Instances are created in Firestore only at registration time — never upfront
 
 ### Points & rewards
 - Children earn points when a parent approves a completed task.
 - Points count toward a **weekly quota** set per child.
-- Excess points beyond the quota are tracked as **available reward points** ("נקודות לפרס").
-- The parent can tap **"תן פרס"** on a child's card (Overview tab) to give a real-life reward and zero out the excess.
-- Unspent excess carries forward to the next week; debt (earning below quota) also carries forward.
+- Excess points beyond the quota are shown as "נקודות לפרס" on the child's home screen.
+- Child taps "נקודות לפרס" → sends a bonus claim request to the parent.
+- Parent sees the request in the **Approvals tab** and taps "תן פרס" to award the real-life reward and zero out the excess.
+- Unspent excess (not claimed as a reward) carries forward to the next week automatically.
+- Debt (earning below quota) also carries forward as a negative carryover.
 
 ### Week
 - The Israel week runs **Sunday → Saturday**.
-- Week initialization is idempotent and runs automatically when either parent or child opens the app.
+- A new week's balance doc is created automatically when the child first opens the app each week.
 
 ---
 
@@ -160,14 +168,14 @@ lib/
     │       └── score_chip.dart             # Styled score badge (e.g. "10 נק׳")
     │
     ├── parent/
-    │   ├── providers/parent_providers.dart # Repository providers + stream providers + approveChore()
+    │   ├── providers/parent_providers.dart # Repository providers + stream providers + actions
     │   └── screens/
     │       ├── parent_dashboard.dart       # 4-tab dashboard (Overview / Chores / Approvals / Family)
-    │       ├── chore_form_screen.dart      # Add / edit chore (type selector + day picker for daily)
+    │       ├── chore_form_screen.dart      # Add / edit chore (weeklyPool or specificDay)
     │       └── add_member_screen.dart      # Pre-add a family member by email
     │
     └── child/
-        ├── providers/child_providers.dart  # currentWeekStart, openInstances, myInstances, myBalance
+        ├── providers/child_providers.dart  # visibleChores, weekInstances, myRegistrations, myBalance
         └── screens/
             └── child_dashboard.dart        # 2-tab dashboard (הבית / המשימות שלי)
 ```
@@ -176,16 +184,16 @@ lib/
 
 | Tab | Label | Contents |
 |---|---|---|
-| 0 | סקירה | Per-child cards showing progress, excess reward points, and "תן פרס" button |
+| 0 | סקירה | Per-child cards showing weekly progress, excess reward points |
 | 1 | משימות | List of all chores; tap to edit, long-press to delete, FAB to create |
-| 2 | אישורים | Completed tasks awaiting approval — approve or reject |
+| 2 | אישורים | Completed chore approvals + pending bonus claim requests |
 | 3 | משפחה | Family members list; primary parent can add/remove members |
 
 ### Child dashboard tabs
 
 | Tab | Label | Contents |
 |---|---|---|
-| 0 | הבית | Weekly goal card → "משימות היום" (today's daily tasks) → "זמין השבוע" (weekly + bonus tasks) |
-| 1 | המשימות שלי | Claimed tasks grouped by status: בביצוע / ממתין לאישור / אושר |
+| 0 | הבית | Weekly goal ring → stat rows → one card per visible chore → day-picker on tap |
+| 1 | המשימות שלי | 4 sections: היום / הקרוב / ממתין לאישור / הושלם |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for Firestore schema, user flows, and design decisions.
