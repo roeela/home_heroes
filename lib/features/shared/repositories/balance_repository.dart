@@ -90,4 +90,17 @@ class BalanceRepository {
         .doc(id)
         .update({'rewardedPoints': FieldValue.increment(excessPoints)});
   }
+
+  /// Deletes all weekly balance documents for a user. Used by the admin reset flow.
+  Future<void> deleteUserBalances(String familyId, String userId) async {
+    final snap = await _balances(familyId)
+        .where('userId', isEqualTo: userId)
+        .get();
+    if (snap.docs.isEmpty) return;
+    final batch = _firestore.batch();
+    for (final doc in snap.docs) {
+      batch.delete(doc.reference);
+    }
+    await batch.commit();
+  }
 }

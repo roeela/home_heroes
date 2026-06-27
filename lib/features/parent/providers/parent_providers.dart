@@ -32,9 +32,10 @@ final choreListProvider = StreamProvider<List<Chore>>((ref) {
 final pendingApprovalProvider = StreamProvider<List<ChoreInstance>>((ref) {
   final user = ref.watch(currentFamilyUserProvider).valueOrNull;
   if (user == null) return Stream.value([]);
+  final weekStart = getWeekStart();
   return ref
       .watch(instanceRepositoryProvider)
-      .watchPendingApproval(user.familyId);
+      .watchPendingApproval(user.familyId, weekStart);
 });
 
 final childrenProvider = StreamProvider<List<FamilyUser>>((ref) {
@@ -55,15 +56,15 @@ final childrenBalancesProvider = StreamProvider<List<WeeklyBalance>>((ref) {
       .watchChildrenBalances(user.familyId, emails, weekStart);
 });
 
-// ── Approval action ───────────────────────────────────────────────────────────
+// ── Actions ───────────────────────────────────────────────────────────────────
 
-Future<void> approveChore(
-    WidgetRef ref, ChoreInstance instance) async {
+Future<void> approveChore(WidgetRef ref, ChoreInstance instance) async {
   final user = ref.read(currentFamilyUserProvider).valueOrNull;
-  if (user == null || instance.claimedBy == null) return;
+  if (user == null) return;
 
   final children = ref.read(childrenProvider).valueOrNull ?? [];
-  final child = children.where((c) => c.email == instance.claimedBy).firstOrNull;
+  final child =
+      children.where((c) => c.email == instance.registeredBy).firstOrNull;
   if (child == null) return;
 
   final weekStart = getWeekStart();
@@ -79,4 +80,13 @@ Future<void> approveChore(
   balanceRepo.addEarnedInBatch(
       batch, user.familyId, child.email, weekStart, instance.choreScore);
   await batch.commit();
+}
+
+Future<void> deleteChore(WidgetRef ref, Chore chore) async {
+  final user = ref.read(currentFamilyUserProvider).valueOrNull;
+  if (user == null) return;
+  final instanceRepo = ref.read(instanceRepositoryProvider);
+  final choreRepo = ref.read(choreRepositoryProvider);
+  await instanceRepo.cancelActiveInstancesForChore(user.familyId, chore.id);
+  await choreRepo.deactivateChore(user.familyId, chore.id);
 }

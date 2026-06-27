@@ -1,0 +1,2 @@
+to create indexes:
+firebase deploy --only firestore:indexes

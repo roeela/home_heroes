@@ -19,20 +19,15 @@ class ChoreRepository {
             .toList());
   }
 
-  Future<List<Chore>> getActiveChores(String familyId) async {
-    final snap =
-        await _chores(familyId).where('isActive', isEqualTo: true).get();
-    return snap.docs.map((doc) => Chore.fromFirestore(doc, familyId)).toList();
-  }
-
   Future<Chore> createChore({
     required String familyId,
     required String name,
     required String description,
     required int score,
     required ChoreType type,
-    required int frequency,
-    required List<int> days,
+    required int availablePerWeek,
+    required List<int> scheduledDays,
+    DateTime? choreWeekStart,
     required String createdBy,
   }) async {
     final doc = _chores(familyId).doc();
@@ -43,8 +38,9 @@ class ChoreRepository {
       description: description,
       score: score,
       type: type,
-      frequency: frequency,
-      days: days,
+      availablePerWeek: availablePerWeek,
+      scheduledDays: scheduledDays,
+      choreWeekStart: choreWeekStart,
       isActive: true,
       createdBy: createdBy,
       createdAt: DateTime.now(),
@@ -60,7 +56,7 @@ class ChoreRepository {
     await _chores(chore.familyId).doc(chore.id).update(data);
   }
 
-  Future<void> deleteChore(String familyId, String choreId) async {
+  Future<void> deactivateChore(String familyId, String choreId) async {
     await _chores(familyId).doc(choreId).update({'isActive': false});
   }
 }

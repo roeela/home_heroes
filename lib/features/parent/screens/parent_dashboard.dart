@@ -31,22 +31,6 @@ class _ParentDashboardState extends ConsumerState<ParentDashboard> {
   ];
 
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initWeek());
-  }
-
-  Future<void> _initWeek() async {
-    final user = ref.read(currentFamilyUserProvider).valueOrNull;
-    if (user == null) return;
-    final chores =
-        await ref.read(choreRepositoryProvider).getActiveChores(user.familyId);
-    await ref
-        .read(instanceRepositoryProvider)
-        .ensureWeekInitialized(user.familyId, getWeekStart(), chores);
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -278,15 +262,16 @@ class _ChoreItem extends ConsumerWidget {
 
   (IconData, String) get _typeDisplay {
     switch (chore.type) {
-      case ChoreType.daily:
-        final label = chore.days.isEmpty
-            ? 'יומי'
-            : chore.days.map((d) => _dayNames[d] ?? '').join(', ');
-        return (Icons.calendar_today_rounded, label);
-      case ChoreType.weekly:
-        return (Icons.repeat_rounded, '${chore.frequency}× בשבוע');
-      case ChoreType.bonus:
-        return (Icons.star_rounded, 'בונוס');
+      case ChoreType.weeklyPool:
+        return (Icons.repeat_rounded, 'עד ${chore.availablePerWeek}× בשבוע');
+      case ChoreType.specificDay:
+        final days = chore.scheduledDays
+            .map((d) => _dayNames[d] ?? '')
+            .join(', ');
+        final week = chore.choreWeekStart != null
+            ? ' (${chore.choreWeekStart!.day}/${chore.choreWeekStart!.month})'
+            : '';
+        return (Icons.calendar_today_rounded, '$days$week');
     }
   }
 
@@ -309,7 +294,7 @@ class _ChoreItem extends ConsumerWidget {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('מחיקת משימה'),
-        content: Text('למחוק את "${chore.name}"?'),
+        content: Text('למחוק את "${chore.name}"?\n\nכל הרישומים הפתוחים יבוטלו.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -321,11 +306,13 @@ class _ChoreItem extends ConsumerWidget {
       ),
     );
     if (ok == true) {
-      final user = ref.read(currentFamilyUserProvider).valueOrNull;
-      if (user != null) {
-        await ref
-            .read(choreRepositoryProvider)
-            .deleteChore(user.familyId, chore.id);
+      try {
+        await deleteChore(ref, chore);
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('שגיאה: $e')));
+        }
       }
     }
   }
@@ -370,10 +357,10 @@ class _ApprovalCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final childName = children
-            .where((c) => c.email == instance.claimedBy)
+            .where((c) => c.email == instance.registeredBy)
             .firstOrNull
             ?.displayName ??
-        instance.claimedBy ?? '?';
+        instance.registeredBy;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -391,6 +378,10 @@ class _ApprovalCard extends ConsumerWidget {
           const SizedBox(height: 4),
           Text('בוצע על ידי: $childName',
               style: const TextStyle(fontSize: 14)),
+          Text(
+            'יום: ${instance.registeredDay.day}/${instance.registeredDay.month}',
+            style: const TextStyle(fontSize: 13),
+          ),
           if (instance.completedAt != null)
             Text(
               'הושלם: ${_fmt(instance.completedAt!)}',
@@ -452,20 +443,20 @@ class _ApprovalCard extends ConsumerWidget {
 
 // ── Tab 3: Family management ──────────────────────────────────────────────────
 
+enum _MemberAction { reset, remove }
+
 class _FamilyTab extends ConsumerWidget {
   const _FamilyTab();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final membersAsync = ref.watch(
-        childrenProvider.select((a) => a)); // all children
     final currentUser = ref.watch(currentFamilyUserProvider).valueOrNull;
-    final allMembersAsync = currentUser != null
+    final membersAsync = currentUser != null
         ? ref.watch(_allMembersProvider(currentUser.familyId))
-        : null;
+        : ref.watch(childrenProvider);
 
     return Scaffold(
-      body: (allMembersAsync ?? membersAsync).when(
+      body: membersAsync.when(
         loading: () => const AppLoading(),
         error: (e, _) => Center(child: Text('שגיאה: $e')),
         data: (members) => ListView.builder(
@@ -490,10 +481,34 @@ class _FamilyTab extends ConsumerWidget {
                   ),
                 if (currentUser?.isPrimary == true &&
                     m.email != currentUser!.email)
-                  IconButton(
-                    icon: const Icon(Icons.person_remove_rounded,
-                        color: Colors.red),
-                    onPressed: () => _confirmRemove(context, ref, m),
+                  PopupMenuButton<_MemberAction>(
+                    onSelected: (action) {
+                      if (action == _MemberAction.reset) {
+                        _confirmReset(context, ref, m);
+                      } else {
+                        _confirmRemove(context, ref, m);
+                      }
+                    },
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: _MemberAction.reset,
+                        child: ListTile(
+                          leading: Icon(Icons.restart_alt_rounded),
+                          title: Text('איפוס'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: _MemberAction.remove,
+                        child: ListTile(
+                          leading: Icon(Icons.person_remove_rounded,
+                              color: Colors.red),
+                          title: Text('הסר',
+                              style: TextStyle(color: Colors.red)),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ],
                   ),
               ]),
             );
@@ -540,6 +555,44 @@ class _FamilyTab extends ConsumerWidget {
         await ref
             .read(userRepositoryProvider)
             .deactivateUser(user.familyId, member.docId);
+      }
+    }
+  }
+
+  Future<void> _confirmReset(
+      BuildContext context, WidgetRef ref, FamilyUser member) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('איפוס משתמש'),
+        content: Text(
+            'לאפס את ${member.displayName}?\n\nפעולה זו תמחק את כל יתרות הנקודות ותבטל את כל הרישומים שלקח/ה.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('ביטול')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('אפס')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      final user = ref.read(currentFamilyUserProvider).valueOrNull;
+      if (user == null) return;
+      await Future.wait([
+        ref
+            .read(balanceRepositoryProvider)
+            .deleteUserBalances(user.familyId, member.email),
+        ref
+            .read(instanceRepositoryProvider)
+            .cancelUserRegistrations(user.familyId, member.email),
+      ]);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${member.displayName} אופס בהצלחה')),
+        );
       }
     }
   }

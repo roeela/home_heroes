@@ -10,6 +10,19 @@ import '../../shared/models/chore_instance.dart';
 import '../../shared/widgets/app_loading.dart';
 import '../../shared/widgets/score_chip.dart';
 
+// 0=Sun … 6=Sat
+const _dayAbbr = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
+
+bool _sameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
+
+// Midnight of the calendar day containing [dt].
+DateTime _dayMidnight(DateTime dt) => DateTime(dt.year, dt.month, dt.day);
+
+// The calendar date for weekday offset [dayIndex] (0=Sun) within [weekStart].
+DateTime _weekDay(DateTime weekStart, int dayIndex) =>
+    DateTime(weekStart.year, weekStart.month, weekStart.day + dayIndex);
+
 class ChildDashboard extends ConsumerStatefulWidget {
   const ChildDashboard({super.key});
 
@@ -28,20 +41,7 @@ class _ChildDashboardState extends ConsumerState<ChildDashboard> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _initWeek();
-      await _ensureBalance();
-    });
-  }
-
-  Future<void> _initWeek() async {
-    final user = ref.read(currentFamilyUserProvider).valueOrNull;
-    if (user == null) return;
-    final chores =
-        await ref.read(choreRepositoryProvider).getActiveChores(user.familyId);
-    await ref
-        .read(instanceRepositoryProvider)
-        .ensureWeekInitialized(user.familyId, getWeekStart(), chores);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _ensureBalance());
   }
 
   Future<void> _ensureBalance() async {
@@ -83,7 +83,7 @@ class _ChildDashboardState extends ConsumerState<ChildDashboard> {
   }
 }
 
-// ── Tab 0: Home (goal + today's tasks + available this week) ──────────────────
+// ── Tab 0: Home ───────────────────────────────────────────────────────────────
 
 class _HomeTab extends ConsumerWidget {
   const _HomeTab();
@@ -91,7 +91,8 @@ class _HomeTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final balanceAsync = ref.watch(myBalanceStreamProvider);
-    final openAsync = ref.watch(openInstancesProvider);
+    final chores = ref.watch(visibleChoresProvider);
+    final weekInstancesAsync = ref.watch(weekAllInstancesProvider);
     final user = ref.watch(currentFamilyUserProvider).valueOrNull;
     final weekStart = ref.watch(currentWeekStartProvider);
 
@@ -103,32 +104,17 @@ class _HomeTab extends ConsumerWidget {
         final earned = balance?.earned ?? 0;
         final carryover = balance?.carryover ?? 0;
         final excess = balance?.availableExcess ?? 0;
-        final progress =
-            quota > 0 ? (earned / quota).clamp(0.0, 1.0) : 0.0;
+        final progress = quota > 0 ? (earned / quota).clamp(0.0, 1.0) : 0.0;
         final colorScheme = Theme.of(context).colorScheme;
-
-        final allOpen = openAsync.valueOrNull ?? [];
-        final today = DateTime.now();
-        final todayInstances = allOpen
-            .where((i) =>
-                i.choreType == ChoreType.daily &&
-                i.scheduledDate != null &&
-                i.scheduledDate!.year == today.year &&
-                i.scheduledDate!.month == today.month &&
-                i.scheduledDate!.day == today.day)
-            .toList();
-        final weekInstances = allOpen
-            .where((i) =>
-                i.choreType == ChoreType.weekly ||
-                i.choreType == ChoreType.bonus)
-            .toList();
+        final weekInstances = weekInstancesAsync.valueOrNull ?? [];
+        final childEmail = user?.email ?? '';
 
         return SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ── Weekly goal card ───────────────────────────────────────────
+              // ── Weekly goal card ─────────────────────────────────────────────
               Text(weekLabel(weekStart),
                   textAlign: TextAlign.center,
                   style: TextStyle(
@@ -217,37 +203,21 @@ class _HomeTab extends ConsumerWidget {
                 ),
               ],
 
-              // ── Today's tasks ──────────────────────────────────────────────
+              // ── Chore cards ──────────────────────────────────────────────────
               const SizedBox(height: 28),
-              _SectionHeader(
-                title: 'משימות היום',
-                subtitle:
-                    '${today.day}/${today.month}',
-              ),
+              const _SectionHeader(title: 'משימות זמינות'),
               const SizedBox(height: 8),
-              if (openAsync.isLoading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 8),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else if (todayInstances.isEmpty)
-                _EmptySection(label: 'אין משימות יומיות להיום')
+              if (weekInstancesAsync.isLoading)
+                const Center(child: CircularProgressIndicator())
+              else if (chores.isEmpty)
+                _EmptySection(label: 'אין משימות זמינות השבוע')
               else
-                ...todayInstances.map((i) => _TaskCard(instance: i)),
-
-              // ── Available this week ────────────────────────────────────────
-              const SizedBox(height: 24),
-              const _SectionHeader(title: 'זמין השבוע'),
-              const SizedBox(height: 8),
-              if (openAsync.isLoading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 8),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else if (weekInstances.isEmpty)
-                _EmptySection(label: 'אין משימות פתוחות השבוע')
-              else
-                ...weekInstances.map((i) => _TaskCard(instance: i)),
+                ...chores.map((chore) => _ChoreCard(
+                      chore: chore,
+                      weekInstances: weekInstances,
+                      childEmail: childEmail,
+                      weekStart: weekStart,
+                    )),
 
               const SizedBox(height: 16),
             ],
@@ -258,23 +228,324 @@ class _HomeTab extends ConsumerWidget {
   }
 }
 
+// A card for a single chore showing availability + child's own registrations.
+class _ChoreCard extends StatelessWidget {
+  final Chore chore;
+  final List<ChoreInstance> weekInstances;
+  final String childEmail;
+  final DateTime weekStart;
+
+  const _ChoreCard({
+    required this.chore,
+    required this.weekInstances,
+    required this.childEmail,
+    required this.weekStart,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final activeForChore = weekInstances
+        .where((i) => i.choreId == chore.id && i.isActiveSlot)
+        .toList();
+    final myActive = activeForChore
+        .where((i) => i.registeredBy == childEmail)
+        .toList();
+    final usedSlots = activeForChore.length;
+    final remaining = chore.availablePerWeek - usedSlots;
+
+    final myDays = myActive
+        .map((i) => '${_dayAbbr[i.registeredDay.weekday % 7]} ${i.registeredDay.day}/${i.registeredDay.month}')
+        .join(', ');
+
+    final subtitle = myDays.isNotEmpty
+        ? 'שלי: $myDays'
+        : remaining > 0
+            ? 'נשארו $remaining מקומות'
+            : 'אין מקומות פנויים';
+
+    final isPoolFull = remaining <= 0 && myActive.isEmpty;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        leading: Icon(
+          chore.type == ChoreType.weeklyPool
+              ? Icons.repeat_rounded
+              : Icons.calendar_today_rounded,
+          color: isPoolFull
+              ? Colors.grey
+              : Theme.of(context).colorScheme.primary,
+          size: 28,
+        ),
+        title: Text(chore.name,
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(subtitle),
+        trailing: ScoreChip(score: chore.score),
+        onTap: isPoolFull
+            ? null
+            : () => _showDayPicker(context),
+      ),
+    );
+  }
+
+  void _showDayPicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => _DayPickerSheet(
+        chore: chore,
+        weekInstances: weekInstances,
+        childEmail: childEmail,
+        weekStart: weekStart,
+      ),
+    );
+  }
+}
+
+// Bottom sheet for selecting (or unselecting) registration days.
+class _DayPickerSheet extends ConsumerWidget {
+  final Chore chore;
+  final List<ChoreInstance> weekInstances;
+  final String childEmail;
+  final DateTime weekStart;
+
+  const _DayPickerSheet({
+    required this.chore,
+    required this.weekInstances,
+    required this.childEmail,
+    required this.weekStart,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final today = _dayMidnight(DateTime.now());
+    final activeForChore = weekInstances
+        .where((i) => i.choreId == chore.id && i.isActiveSlot)
+        .toList();
+    final usedSlots = activeForChore.length;
+    final remaining = chore.availablePerWeek - usedSlots;
+
+    // Which day indices to show
+    final List<int> dayIndices = chore.type == ChoreType.weeklyPool
+        ? List.generate(7, (i) => i)
+        : chore.scheduledDays;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Handle
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(chore.name,
+              style:
+                  const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          Text(
+            remaining > 0
+                ? 'נשארו $remaining מקומות פנויים'
+                : 'כל המקומות תפוסים',
+            style: TextStyle(
+                fontSize: 13,
+                color: remaining > 0 ? Colors.green[700] : Colors.red[700]),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: dayIndices.map((dayIdx) {
+              final day = _weekDay(weekStart, dayIdx);
+              final dayMidnight = _dayMidnight(day);
+              final isPast = dayMidnight.isBefore(today);
+              final myInstance = activeForChore
+                  .where((i) =>
+                      i.registeredBy == childEmail &&
+                      _sameDay(i.registeredDay, dayMidnight))
+                  .firstOrNull;
+              final isMine = myInstance != null;
+              final takenByOther = activeForChore.any((i) =>
+                  i.registeredBy != childEmail &&
+                  _sameDay(i.registeredDay, dayMidnight));
+              final isPoolFull = remaining <= 0 && !isMine;
+              final isDisabled = isPast || takenByOther || isPoolFull;
+
+              final label =
+                  '${_dayAbbr[dayIdx]}\n${day.day}/${day.month}';
+
+              if (isMine) {
+                return _DayChip(
+                  label: label,
+                  state: _ChipState.mine,
+                  onTap: () => _unregister(ref, context, myInstance),
+                );
+              }
+              return _DayChip(
+                label: label,
+                state: isDisabled
+                    ? (takenByOther
+                        ? _ChipState.taken
+                        : _ChipState.disabled)
+                    : _ChipState.available,
+                onTap: isDisabled
+                    ? null
+                    : () => _register(ref, context, dayMidnight),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 8),
+          if (chore.type == ChoreType.weeklyPool)
+            Text(
+              'לחץ על יום כדי להירשם • לחץ שוב על יום שלך כדי לבטל',
+              style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant),
+              textAlign: TextAlign.center,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _register(
+      WidgetRef ref, BuildContext context, DateTime day) async {
+    final user = ref.read(currentFamilyUserProvider).valueOrNull;
+    if (user == null) return;
+    try {
+      await ref
+          .read(instanceRepositoryProvider)
+          .registerForDay(user.familyId, chore, day, user.email, weekStart);
+      if (context.mounted) Navigator.of(context).pop();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text(
+                  'נרשמת ל"${chore.name}" ב-${day.day}/${day.month} ✓')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
+  }
+
+  Future<void> _unregister(
+      WidgetRef ref, BuildContext context, ChoreInstance instance) async {
+    final user = ref.read(currentFamilyUserProvider).valueOrNull;
+    if (user == null) return;
+    try {
+      await ref
+          .read(instanceRepositoryProvider)
+          .unregister(user.familyId, instance.id);
+      if (context.mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('שגיאה: $e')));
+      }
+    }
+  }
+}
+
+enum _ChipState { available, mine, taken, disabled }
+
+class _DayChip extends StatelessWidget {
+  final String label;
+  final _ChipState state;
+  final VoidCallback? onTap;
+
+  const _DayChip({required this.label, required this.state, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    Color bg;
+    Color fg;
+    Color border;
+    bool showCheck = false;
+
+    switch (state) {
+      case _ChipState.mine:
+        bg = colorScheme.primary;
+        fg = colorScheme.onPrimary;
+        border = colorScheme.primary;
+        showCheck = true;
+      case _ChipState.available:
+        bg = colorScheme.surface;
+        fg = colorScheme.onSurface;
+        border = colorScheme.outline;
+      case _ChipState.taken:
+        bg = colorScheme.surfaceContainerHighest;
+        fg = colorScheme.onSurfaceVariant.withValues(alpha: 0.5);
+        border = colorScheme.outlineVariant;
+      case _ChipState.disabled:
+        bg = colorScheme.surfaceContainerHighest;
+        fg = colorScheme.onSurfaceVariant.withValues(alpha: 0.4);
+        border = colorScheme.outlineVariant;
+    }
+
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 70,
+        height: 64,
+        decoration: BoxDecoration(
+          color: bg,
+          border: Border.all(color: border),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Stack(
+          children: [
+            Center(
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: fg),
+              ),
+            ),
+            if (showCheck)
+              Positioned(
+                top: 4,
+                right: 4,
+                child: Icon(Icons.check_circle, size: 14, color: fg),
+              ),
+            if (state == _ChipState.taken)
+              Positioned(
+                top: 4,
+                right: 4,
+                child: Icon(Icons.lock_outline, size: 13, color: fg),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _SectionHeader extends StatelessWidget {
   final String title;
-  final String? subtitle;
-  const _SectionHeader({required this.title, this.subtitle});
+  const _SectionHeader({required this.title});
 
   @override
   Widget build(BuildContext context) {
     return Row(children: [
       Text(title,
           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-      if (subtitle != null) ...[
-        const SizedBox(width: 8),
-        Text(subtitle!,
-            style: TextStyle(
-                fontSize: 13,
-                color: Theme.of(context).colorScheme.onSurfaceVariant)),
-      ],
       const Expanded(child: Divider(indent: 12)),
     ]);
   }
@@ -293,59 +564,6 @@ class _EmptySection extends StatelessWidget {
               fontSize: 13,
               color: Theme.of(context).colorScheme.onSurfaceVariant)),
     );
-  }
-}
-
-class _TaskCard extends ConsumerWidget {
-  final ChoreInstance instance;
-  const _TaskCard({required this.instance});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final isBonus = instance.choreType == ChoreType.bonus;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: Icon(
-          isBonus ? Icons.star_rounded : Icons.task_alt_rounded,
-          color: isBonus ? Colors.amber[700] : Colors.green,
-          size: 30,
-        ),
-        title: Text(instance.choreName,
-            style: const TextStyle(fontWeight: FontWeight.bold)),
-        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-          ScoreChip(score: instance.choreScore),
-          const SizedBox(width: 8),
-          FilledButton(
-            onPressed: () => _claim(ref, context),
-            style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                minimumSize: const Size(0, 36)),
-            child: const Text('קח'),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  Future<void> _claim(WidgetRef ref, BuildContext context) async {
-    final user = ref.read(currentFamilyUserProvider).valueOrNull;
-    if (user == null) return;
-    try {
-      await ref
-          .read(instanceRepositoryProvider)
-          .claimInstance(user.familyId, instance.id, user.email);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('נרשמת למשימה "${instance.choreName}" ✓')),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$e')));
-      }
-    }
   }
 }
 
@@ -381,47 +599,72 @@ class _StatRow extends StatelessWidget {
   }
 }
 
-// ── Tab 1: My chores ──────────────────────────────────────────────────────────
+// ── Tab 1: My Chores (4 sections) ────────────────────────────────────────────
 
 class _MyChoresTab extends ConsumerWidget {
   const _MyChoresTab();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final myAsync = ref.watch(myInstancesProvider);
+    final myAsync = ref.watch(myRegistrationsProvider);
 
     return myAsync.when(
       loading: () => const AppLoading(),
       error: (e, _) => Center(child: Text('שגיאה: $e')),
       data: (instances) {
-        if (instances.isEmpty) {
+        final today = _dayMidnight(DateTime.now());
+
+        // Partition into the 4 visible sections (silently drop expired & cancelled/rejected)
+        final todayList = instances
+            .where((i) =>
+                i.status == InstanceStatus.registered &&
+                _sameDay(i.registeredDay, today))
+            .toList();
+        final upcomingList = instances
+            .where((i) =>
+                i.status == InstanceStatus.registered &&
+                i.registeredDay.isAfter(today))
+            .toList()
+          ..sort((a, b) => a.registeredDay.compareTo(b.registeredDay));
+        final pendingList = instances
+            .where((i) => i.status == InstanceStatus.completed)
+            .toList();
+        final doneList = instances
+            .where((i) => i.status == InstanceStatus.approved)
+            .toList();
+
+        final hasAnything = todayList.isNotEmpty ||
+            upcomingList.isNotEmpty ||
+            pendingList.isNotEmpty ||
+            doneList.isNotEmpty;
+
+        if (!hasAnything) {
           return const Center(
             child: Text('טרם נרשמת למשימות השבוע.\nלחץ על "הבית" כדי להתחיל.',
                 textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
           );
         }
-        final active =
-            instances.where((i) => i.status == InstanceStatus.claimed).toList();
-        final pending = instances
-            .where((i) => i.status == InstanceStatus.completed)
-            .toList();
-        final approved =
-            instances.where((i) => i.status == InstanceStatus.approved).toList();
 
         return ListView(
           padding: const EdgeInsets.all(8),
           children: [
-            if (active.isNotEmpty) ...[
-              _sectionHeader('בביצוע'),
-              ...active.map((i) => _MyChoreCard(instance: i)),
+            if (todayList.isNotEmpty) ...[
+              _sectionLabel('היום'),
+              ...todayList.map((i) =>
+                  _MyChoreCard(instance: i, showDoneButton: true)),
             ],
-            if (pending.isNotEmpty) ...[
-              _sectionHeader('ממתין לאישור הורה'),
-              ...pending.map((i) => _MyChoreCard(instance: i)),
+            if (upcomingList.isNotEmpty) ...[
+              _sectionLabel('הקרוב'),
+              ...upcomingList.map((i) =>
+                  _MyChoreCard(instance: i, showUnregisterButton: true)),
             ],
-            if (approved.isNotEmpty) ...[
-              _sectionHeader('אושר ✓'),
-              ...approved.map((i) => _MyChoreCard(instance: i)),
+            if (pendingList.isNotEmpty) ...[
+              _sectionLabel('ממתין לאישור הורה'),
+              ...pendingList.map((i) => _MyChoreCard(instance: i)),
+            ],
+            if (doneList.isNotEmpty) ...[
+              _sectionLabel('הושלם ✓'),
+              ...doneList.map((i) => _MyChoreCard(instance: i)),
             ],
           ],
         );
@@ -429,7 +672,7 @@ class _MyChoresTab extends ConsumerWidget {
     );
   }
 
-  Widget _sectionHeader(String title) => Padding(
+  Widget _sectionLabel(String title) => Padding(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
         child: Text(title,
             style: const TextStyle(
@@ -441,42 +684,64 @@ class _MyChoresTab extends ConsumerWidget {
 
 class _MyChoreCard extends ConsumerWidget {
   final ChoreInstance instance;
-  const _MyChoreCard({required this.instance});
+  final bool showDoneButton;
+  final bool showUnregisterButton;
+
+  const _MyChoreCard({
+    required this.instance,
+    this.showDoneButton = false,
+    this.showUnregisterButton = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final isClaimed = instance.status == InstanceStatus.claimed;
     final isApproved = instance.status == InstanceStatus.approved;
+    final isPending = instance.status == InstanceStatus.completed;
+
+    IconData icon;
+    Color iconColor;
+    if (isApproved) {
+      icon = Icons.verified_rounded;
+      iconColor = Colors.green;
+    } else if (isPending) {
+      icon = Icons.pending_actions_rounded;
+      iconColor = Colors.blue;
+    } else {
+      icon = Icons.hourglass_top_rounded;
+      iconColor = Colors.orange;
+    }
+
+    final dayLabel =
+        '${instance.registeredDay.day}/${instance.registeredDay.month}';
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
       child: ListTile(
-        leading: Icon(
-          isApproved
-              ? Icons.verified_rounded
-              : isClaimed
-                  ? Icons.hourglass_top_rounded
-                  : Icons.pending_actions_rounded,
-          color: isApproved
-              ? Colors.green
-              : isClaimed
-                  ? Colors.orange
-                  : Colors.blue,
-          size: 30,
-        ),
+        leading: Icon(icon, color: iconColor, size: 30),
         title: Text(instance.choreName,
             style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(dayLabel),
         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
           ScoreChip(
               score: instance.choreScore,
               color: isApproved ? Colors.green : null),
-          if (isClaimed) ...[
+          if (showDoneButton) ...[
             const SizedBox(width: 8),
             FilledButton(
               onPressed: () => _markDone(ref, context),
               style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(horizontal: 12)),
               child: const Text('בוצע!'),
+            ),
+          ],
+          if (showUnregisterButton) ...[
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: () => _unregister(ref, context),
+              style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  foregroundColor: Colors.red),
+              child: const Text('בטל'),
             ),
           ],
         ]),
@@ -496,6 +761,21 @@ class _MyChoreCard extends ConsumerWidget {
           const SnackBar(content: Text('מעולה! ממתין לאישור הורה.')),
         );
       }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('שגיאה: $e')));
+      }
+    }
+  }
+
+  Future<void> _unregister(WidgetRef ref, BuildContext context) async {
+    final user = ref.read(currentFamilyUserProvider).valueOrNull;
+    if (user == null) return;
+    try {
+      await ref
+          .read(instanceRepositoryProvider)
+          .unregister(user.familyId, instance.id);
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context)
